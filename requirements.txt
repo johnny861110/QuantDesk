@@ -1,0 +1,3 @@
+# ⚠️ 本專案改用 uv 管理依賴，依賴定義在 pyproject.toml，鎖定在 uv.lock。
+# 不要手動編輯此檔。如需匯出給不支援 uv 的環境：
+#   uv export --format requirements-txt > requirements.txt
