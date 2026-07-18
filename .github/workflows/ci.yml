@@ -1,16 +1,29 @@
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout quantdesk-starter
+        uses: actions/checkout@v4
+        with:
+          path: quantdesk-starter
+
+      - name: Checkout FinancialReports (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: johnny861110/FinancialReports
+          path: FinancialReports
+
+      - name: Checkout Financial_Agent (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: johnny861110/Financial_Agent
+          path: Financial_Agent
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -18,13 +31,21 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
+        working-directory: quantdesk-starter
         run: uv python install
 
       - name: Sync dependencies
+        working-directory: quantdesk-starter
         run: uv sync --all-groups
 
       - name: Lint
+        working-directory: quantdesk-starter
         run: uv run ruff check .
 
+      - name: Type check
+        working-directory: quantdesk-starter
+        run: uv run mypy .
+
       - name: Test
+        working-directory: quantdesk-starter
         run: uv run pytest -q
