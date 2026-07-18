@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
     "langgraph>=0.2",
+    "financial-reports",
+    "financial-agent",
 ]
 
 [dependency-groups]
@@ -17,6 +19,9 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "integration: hits real SQLiteStore / filesystem; run with: uv run pytest -m integration",
+]
 
 [tool.ruff]
 target-version = "py311"
@@ -27,3 +32,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["schemas", "adapters", "supervisor", "agents"]
+
+[tool.uv.sources]
+financial-reports = { path = "../FinancialReports", editable = true }
+financial-agent = { path = "../Financial_Agent", editable = true }
