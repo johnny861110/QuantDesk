@@ -36,7 +36,7 @@
 ### 0.2 貫穿全系統的三條設計原則
 
 1. **確定性計算與 LLM 生成嚴格分離**：所有數字（財務指標、Greeks、技術指標、統計量）一律由確定性程式產出，LLM 只負責「路由、組織語言、下結論、寫白話說明」，永遠不負責產出數字。這是從 FinancialReports 的 Verifier 精神延伸到整個系統的統一哲學。
-2. **風控是硬約束，不是投票的一票**：風控 agent 的 `hard_constraints` 一旦觸發，Supervisor 的最終建議必須被強制降級或加註警告，不能被其他 agent 的樂觀訊號蓋過。
+2. **風控是硬約束，不是投票的一票**：任何 domain agent 的 `hard_constraints` 一旦觸發，Supervisor 的最終建議必須被強制降級或加註警告，不能被其他 agent 的樂觀訊號蓋過。
 3. **每個判斷都要帶來源與時間戳**：資料有時效，`asof` 是一等公民；系統要能區分「最新事實」與「已作廢的舊值」（財報重編、數據修正）。
 
 ---
@@ -127,7 +127,7 @@
 ### 3.1 各欄位的設計理由
 
 - **`time_horizon`（時間框架）**：整個 schema 最關鍵的欄位之一。技術面只對短期有效、基本面對中長期有效——匯總層不該把它們硬融成一句話，而要能呈現「短期技術轉弱、中長期基本面支撐」的分層觀點。沒有這個欄位，Supervisor 就只能和稀泥。
-- **`hard_constraints`（硬約束）**：風控 agent 專用，觸發後 Supervisor 不能覆蓋。見第 4.1 與第 5 節。
+- **`hard_constraints`（硬約束）**：任何 domain agent 均可發起，觸發後 Supervisor 不能覆蓋。目前已知會發起的 agent：risk agent（Greeks 曝險限制：gamma/vega/delta/集中度）、fundamental agent（EWS critical/high 觸發財務預警）。見第 4.1 與第 5 節。
 - **`confidence` + `data_quality`**：Supervisor 做信心加權的輸入。財報可靠但落後、新聞即時但雜訊高，權重不該一樣。
 - **`key_evidence[].source` + `asof`**：可稽核性的載體。每個結論都能點回帶時間戳的原始來源。
 - **`errors`**：agent 部分失敗時（例如某個資料源掛了）不整個崩潰，而是回報「這部分沒資料」，讓 Supervisor 決定要不要降低該 agent 權重或標註不確定。
@@ -253,11 +253,16 @@ Portfolio Theta     = Σ (qtyᵢ × multiplierᵢ × Θᵢ)
 
 **① 硬約束優先（規則層，不可被 LLM 覆蓋）**
 ```
-if any risk_agent.hard_constraints[].breached == true:
+if any agent.hard_constraints[].breached == true:
     最終建議強制降級 / 加註強制警告
     （LLM 不得自由裁量是否忽略）
 ```
 這是規則引擎層，不是 Supervisor LLM 的自由裁量。延續「風控是硬約束不是投票的一票」原則。
+
+硬約束可由任何 domain agent 發起，Supervisor 統一處理所有 breached=True 的項目：
+- **risk agent**：Greeks 曝險限制（gamma_limit、vega_limit、net_delta_pct_nav、sector_concentration）
+- **fundamental agent**：EWS critical/high 觸發財務預警（receivables_spike、margin_compression 等）
+- 未來 agent 若有需要亦可直接在其 AgentSignal.hard_constraints 中發起，無需修改 Supervisor 核心邏輯
 
 **② 時間框架分層（不強融成單一結論）**
 不把六個 agent 硬融成一句話，而是按 `time_horizon` 分層呈現：
