@@ -43,6 +43,16 @@ class AgentType(str, Enum):
 
 
 class Target(BaseModel):
+    """
+    輸出對象。單標的 agent（fundamental / technical / news）填真實市場代碼；
+    組合層級 agent 使用保留值。
+
+    ⚠️ 保留值 "PORTFOLIO"：risk_agent 的 target.symbol 固定為此值，代表整個組合
+    層級的輸出，而非可查詢的真實市場標的代碼。實際涵蓋的標的清單在
+    AgentSignal.metrics["covered_symbols"]。下游任何要用 target.symbol 去查
+    資料源的邏輯（FinMind 拉價格、新聞 API 搜標的等），都必須先檢查是否等於
+    "PORTFOLIO" 並排除，否則會查到不存在的代碼。
+    """
     symbol: str
     market: str  # e.g. "TW", "US"
     asof: datetime
