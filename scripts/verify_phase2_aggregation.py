@@ -38,6 +38,7 @@ from agents.risk.pricing_router import (  # noqa: E402
     OptionSpec,
     price_option,
 )
+from agents.risk.scenario import run_scenarios  # noqa: E402
 
 # ─── Placeholder market data ──────────────────────────────────────────────────
 # ⚠️ These are illustrative values. Replace with live feed in Phase 4+.
@@ -381,6 +382,111 @@ def show_fx_degradation_demo(
             print(f"    {hc.type:<26}  {status}")
 
 
+def step5_scenario(
+    positions: list[Position],
+    greeks_map: dict[int, GreeksResult],
+    usdtwd: float | None,
+) -> None:
+    """
+    Demonstrate negative convexity using positions.yaml (空2口TXFF + 空5口TXO call
+    + 多5口TXO put).
+
+    For USD positions the pre-converted TWD spot must be used (same caller contract
+    as aggregation).  Here we build a twd_spot_map consistent with step3_greeks.
+    """
+    _section("Step 5 — Scenario Stress Test（負凸性驗證）")
+    print("  ΔP ≈ Δ×ΔS + ½×Γ×(ΔS)² + ν×ΔIV + Θ×Δt  (Δt = 1/365 calendar day)")
+    print()
+
+    # twd_spot_map: pre-convert USD positions — same contract as aggregation.py
+    twd_spot_map: dict[str, float] = {}
+    for sym, px in SPOT_MAP.items():
+        if sym == "AAPL" and usdtwd is not None:
+            twd_spot_map[sym] = px * usdtwd
+        else:
+            twd_spot_map[sym] = px
+
+    result = run_scenarios(
+        positions, greeks_map, twd_spot_map, days_held=1.0
+    )
+
+    # Print compact table for key scenarios: index ±1%/3%/5% × iv=0
+    print("  ── 固定 Δσ=0（純標的波動效果）──────────────────────────────────────")
+    header = (f"  {'Shock':>7}  {'Δ-P&L':>12}  {'Γ-P&L':>12}  "
+              f"{'ν-P&L':>10}  {'Θ-P&L':>10}  {'Total':>12}")
+    print(header)
+    print(f"  {'─'*7}  {'─'*12}  {'─'*12}  {'─'*10}  {'─'*10}  {'─'*12}")
+
+    for row in result.scenarios:
+        if row.iv_shock != 0.0:
+            continue
+        shock_pct = f"{row.index_shock:+.0%}"
+        convex_flag = " ◀ 負凸性" if row.index_shock > 0 else ""
+        print(
+            f"  {shock_pct:>7}  {row.agg_delta_pnl:>+12,.0f}  "
+            f"{row.agg_gamma_pnl:>+12,.0f}  {row.agg_vega_pnl:>+10,.0f}  "
+            f"{row.agg_theta_pnl:>+10.1f}  {row.agg_total_pnl:>+12,.0f}"
+            f"{convex_flag}"
+        )
+
+    print()
+    print("  ── 負凸性驗證：空 TXFF + 空 TXO call + 多 TXO put（三個核心部位）─")
+    row3 = next(r for r in result.scenarios if r.index_shock == 0.03 and r.iv_shock == 0.0)
+    row5 = next(r for r in result.scenarios if r.index_shock == 0.05 and r.iv_shock == 0.0)
+
+    # Core positions: TXFF (futures) + TXO positions only — user specifically asked about these
+    core_syms = {"TXFF", "TXO"}
+    core3 = sum(leg.total_pnl for leg in row3.legs if leg.symbol in core_syms)
+    core5 = sum(leg.total_pnl for leg in row5.legs if leg.symbol in core_syms)
+    ratio = abs(core5) / abs(core3) if core3 != 0.0 else float("inf")
+    print(f"  核心三部位 +3% 合計 P&L : {core3:>+12,.0f} TWD")
+    print(f"  核心三部位 +5% 合計 P&L : {core5:>+12,.0f} TWD")
+    print(f"  |+5%| / |+3%| = {ratio:.4f}  （純線性應為 5/3 ≈ {5/3:.4f}；超過 → 負凸性）")
+    if ratio > 5 / 3:
+        _ok(f"ratio={ratio:.4f} > 5/3={5/3:.4f}  → 確認負凸性（空call short-gamma主導）")
+    else:
+        _warn(f"ratio={ratio:.4f} ≤ 5/3  → 核心部位淨 gamma 趨近中性或正值")
+
+    # Full portfolio note: AAPL long call adds positive gamma, may dominate
+    agg_gamma3 = row3.agg_gamma_pnl
+    if agg_gamma3 > 0:
+        print(f"  （全組合淨 gamma P&L = +{agg_gamma3:,.0f}：AAPL long call 使全組合偏多 gamma）")
+    else:
+        print(f"  （全組合淨 gamma P&L = {agg_gamma3:,.0f}：全組合空 gamma）")
+
+    print()
+    print("  ── +3% 各腿 P&L 明細 ──────────────────────────────────────────────")
+    for leg in row3.legs:
+        print(f"  [{leg.position_idx}] {leg.symbol:<8} {leg.instrument_type:<8}  "
+              f"δ={leg.delta_pnl:>+10,.0f}  γ={leg.gamma_pnl:>+10,.0f}  "
+              f"ν={leg.vega_pnl:>+8,.0f}  θ={leg.theta_pnl:>+8.2f}  "
+              f"total={leg.total_pnl:>+10,.0f}  TWD")
+
+    print()
+    print("  ── +5% 各腿 P&L 明細 ──────────────────────────────────────────────")
+    for leg in row5.legs:
+        print(f"  [{leg.position_idx}] {leg.symbol:<8} {leg.instrument_type:<8}  "
+              f"δ={leg.delta_pnl:>+10,.0f}  γ={leg.gamma_pnl:>+10,.0f}  "
+              f"ν={leg.vega_pnl:>+8,.0f}  θ={leg.theta_pnl:>+8.2f}  "
+              f"total={leg.total_pnl:>+10,.0f}  TWD")
+
+    print()
+    print("  ── IV 情境矩陣（僅 +3% 標的波動 × 所有 IV shock）─────────────────")
+    hdr2 = (f"  {'Δσ':>7}  {'Δ-P&L':>12}  {'Γ-P&L':>12}  "
+            f"{'ν-P&L':>10}  {'Θ-P&L':>10}  {'Total':>12}")
+    print(hdr2)
+    print(f"  {'─'*7}  {'─'*12}  {'─'*12}  {'─'*10}  {'─'*10}  {'─'*12}")
+    for row in result.scenarios:
+        if row.index_shock != 0.03:
+            continue
+        iv_str = f"{row.iv_shock:+.0%}"
+        print(
+            f"  {iv_str:>7}  {row.agg_delta_pnl:>+12,.0f}  "
+            f"{row.agg_gamma_pnl:>+12,.0f}  {row.agg_vega_pnl:>+10,.0f}  "
+            f"{row.agg_theta_pnl:>+10.1f}  {row.agg_total_pnl:>+12,.0f}"
+        )
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -399,6 +505,7 @@ def main() -> None:
 
     print_summary(result, portfolio_nav)
     show_fx_degradation_demo(positions, greeks_map, portfolio_nav)
+    step5_scenario(positions, greeks_map, usdtwd)
 
     _bar("═")
     print("  驗證完成。")
