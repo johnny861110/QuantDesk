@@ -32,6 +32,13 @@
 7. `agents/risk/scenario.py` — 情境壓力測試：
    ΔP ≈ Δ×ΔS + ½×Γ×(ΔS)² + ν×ΔIV + Θ×Δt
    自動跑固定情境矩陣（大盤 ±1%/±3%/±5% × IV ±10%/±20%）。
+
+   ⚠️ **Δt 日計慣例強制要求（與 black_scholes.py 對齊）**：
+   `bs_theta` 採日曆天 365 慣例（`theta_per_calendar_day = annual_theta / 365`）。
+   scenario.py 的 Θ×Δt 項中，Δt **必須**同樣以日曆天表示：
+   `Δt = calendar_days / 365`（例如持有 1 天 → Δt = 1/365 ≈ 0.00274）。
+   **禁止**改用交易日 252（`calendar_days / 252`）——混用會對 theta P&L 項產生
+   系統性 ~45 % 高估誤差，且難以被上層測試發現。
 8. `agents/risk_agent.py` — 產出 AgentSignal，含 hard_constraints
    （gamma_limit / vega_limit / net_delta_pct_nav / sector_concentration）。
 

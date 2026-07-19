@@ -57,3 +57,7 @@ class MacroAdapter(DataSourceAdapter):
 
 class CrossMarketAdapter(DataSourceAdapter):
     """跨市場：yfinance（美股指數）/ 台指期源。"""
+
+
+class FXAdapter(DataSourceAdapter):
+    """外匯匯率：yfinance / 中央銀行公告 / 券商報價。"""
