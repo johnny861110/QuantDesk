@@ -120,7 +120,11 @@ class FinMindOptionsAdapter(OptionsAdapter):
     def source_name(self) -> str:
         return "finmind_taiwan_option_daily"
 
-    def fetch(  # type: ignore[override]  # domain-specific signature; base uses **kwargs
+    def fetch(  # type: ignore[override]
+        # Intentional design — see adapters/base.py DataSourceAdapter docstring.
+        # Concrete signature chosen over **kwargs to retain static type safety at
+        # call sites.  Swapping to 國泰期貨 API requires updating both the adapter
+        # class and its callers; **kwargs would only hide that requirement.
         self,
         stock_id: str,
         as_of: date,
