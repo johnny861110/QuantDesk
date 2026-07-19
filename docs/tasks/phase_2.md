@@ -50,6 +50,25 @@
 - IV 資料缺失時，保守回報「無法評估凸性風險」並降低 confidence，不當作無風險
 - uv run pytest -q 全過（含已知 Greeks 數值的單元測試對答案）
 
+## 技術債（Phase 3 補齊）
+
+### scenario.py — 個股/美股情境聯動（beta 未估計）
+情境壓力測試的 index_shock 目前**只精確套用在 `INDEX_DERIVATIVE_SYMBOLS` 涵蓋的部位**
+（TXFF、TXO 等台指衍生品）。個股（2330.TW、AAPL）與個股選擇權（AAPL call）
+在 `ScenarioResult.unmapped_symbols` 裡被標記為「beta 未估計，此情境下無法精確評估」，
+不納入情境 P&L 計算。
+
+**原因**：對個股直接套用 `index_shock × spot × delta` 等同隱性假設 beta=1，
+與 `aggregation.py` 刻意將這些部位歸入 `unmapped_single_name_exposure`
+（明確拒絕假設 beta）的設計矛盾。
+
+**Phase 3 需補上**：
+- 在 `agents/technical/` 或 `agents/cross_market/` 裡實作 rolling beta 估計
+  （60-day window 對 TAIEX 的 OLS regression）
+- `run_scenarios()` 新增可選的 `beta_map: dict[str, float]` 參數；
+  有 beta 的個股用 `ΔS_individual = index_shock × beta × spot` 計入 P&L；
+  仍缺 beta 的留在 `unmapped_symbols`
+
 ## ⚠️ 鐵則
 - Greeks 計算是純數學，不准用 LLM
 - 反推 IV 的無風險利率/股利率假設要寫成具名常數 + comment，不能是魔術數字
