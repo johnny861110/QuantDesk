@@ -25,13 +25,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from adapters.fx_adapter import YFinanceFXAdapter
-from agents.risk.aggregation import (
+from adapters.fx_adapter import YFinanceFXAdapter  # noqa: E402
+from agents.risk.aggregation import (  # noqa: E402
     AggregationResult,
     aggregate,
 )
-from agents.risk.position_loader import Position, load_portfolio
-from agents.risk.pricing_router import (
+from agents.risk.position_loader import Position, load_portfolio  # noqa: E402
+from agents.risk.pricing_router import (  # noqa: E402
     DEFAULT_DIVIDEND_YIELD,
     DEFAULT_RISK_FREE_RATE,
     GreeksResult,
@@ -154,7 +154,7 @@ def step3_greeks(
         print(f"  USD → TWD 換算匯率: {usdtwd:.4f}（用於 spot/strike 預轉換）")
     else:
         _warn("usdtwd=None，USD 部位以原始 USD spot 定價，gamma 單位不正確。")
-    print(f"  Spot prices (PLACEHOLDER, USD 部位如有 FX 則換算成 TWD):")
+    print("  Spot prices (PLACEHOLDER, USD 部位如有 FX 則換算成 TWD):")
     for sym, px in SPOT_MAP.items():
         if usdtwd is not None and sym == "AAPL":
             print(f"    {sym:<10}  {px:>10,.1f} USD → {px * usdtwd:>12,.1f} TWD")
@@ -185,6 +185,11 @@ def step3_greeks(
         if T <= 0:
             _warn(f"[{idx}] {pos.symbol}: T={T:.4f} ≤ 0，略過")
             continue
+
+        # Narrow Optional fields — guaranteed non-None for valid options by position_loader.
+        assert pos.strike is not None
+        assert pos.option_type is not None
+        assert pos.style is not None
 
         # Pre-convert USD spot/strike to TWD so Greeks are in TWD units.
         # This is the source-of-truth fix for gamma units: γ_TWD = γ_USD / fx,
@@ -359,7 +364,7 @@ def show_fx_degradation_demo(
     ctwd = r_no_fx.consolidated_twd
     excl = ctwd.excluded_currencies
     if excl:
-        _warn(f"consolidated_twd 已部分合算  ← 預期行為（fail-safe）")
+        _warn("consolidated_twd 已部分合算  ← 預期行為（fail-safe）")
         _warn(f"  排除幣別（缺少匯率）: {excl}")
         _ok(f"  可用幣別（TWD）合算結果: {ctwd.net_delta_notional_twd:+,.0f} TWD")
         _ok("  hard_constraints 仍依可用資料評估，不因 USD 缺失而全部跳過")

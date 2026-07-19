@@ -10,14 +10,11 @@ Coverage
 """
 from __future__ import annotations
 
-import io
 from pathlib import Path
 
 import pytest
-import yaml
 
 from agents.risk.position_loader import (
-    DEFAULT_POSITIONS_PATH,
     Position,
     load_positions,
 )

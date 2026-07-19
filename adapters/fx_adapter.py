@@ -19,7 +19,6 @@ tech-debt
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from adapters.base import FXAdapter, SourcedData
@@ -74,7 +73,7 @@ class YFinanceFXAdapter(FXAdapter):
             source  : "yfinance_fx"
             asof    : datetime of the last session whose close was used
         """
-        import yfinance as yf  # lazy — only needed for real calls
+        import yfinance as yf  # type: ignore[import-untyped]  # no stubs for yfinance
 
         ticker_symbol = f"{pair}{_YF_FX_SUFFIX}"
         ticker = yf.Ticker(ticker_symbol)

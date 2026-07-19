@@ -120,7 +120,7 @@ class FinMindOptionsAdapter(OptionsAdapter):
     def source_name(self) -> str:
         return "finmind_taiwan_option_daily"
 
-    def fetch(
+    def fetch(  # type: ignore[override]  # domain-specific signature; base uses **kwargs
         self,
         stock_id: str,
         as_of: date,

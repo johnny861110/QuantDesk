@@ -327,10 +327,10 @@ def aggregate(
     excluded_ccys: list[str] = []
 
     for ccy, totals in ccy_totals.items():
-        rate = fx_rates_map.get(ccy)
-        if rate is not None:
+        fx_rate = fx_rates_map.get(ccy)
+        if fx_rate is not None:
             # delta_notional is in position currency → multiply by FX to get TWD.
-            partial["net_delta_notional_twd"] += totals["net_delta_notional"] * rate
+            partial["net_delta_notional_twd"] += totals["net_delta_notional"] * fx_rate
             # gamma/vega/theta: caller pre-converts non-TWD spot to TWD before
             # calling price_option, so greeks_map values are already in TWD units.
             # Do NOT apply FX here — that would double-convert (γ × fx² instead of γ/fx).

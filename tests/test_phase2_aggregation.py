@@ -41,7 +41,6 @@ net_delta_pct_nav = -165 000 / 1 000 000 = -16.5 %  → NOT breached (< 30 %)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -50,11 +49,9 @@ import pytest
 from adapters.base import DataSourceAdapter, SourcedData
 from adapters.fx_adapter import FXRate
 from agents.risk.aggregation import (
-    GAMMA_LIMIT_TWD,
     NET_DELTA_PCT_NAV_LIMIT,
     TAIEX_UNDERLYING,
     UNMAPPED_BETA_NOTE,
-    VEGA_LIMIT_TWD,
     AggregationResult,
     aggregate,
 )

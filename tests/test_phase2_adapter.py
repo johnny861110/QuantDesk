@@ -170,7 +170,7 @@ class TestIVRoundTrip:
     """Back out IV from a known BS price; the solved IV should match the original."""
 
     def test_roundtrip_call(self, adapter):
-        from agents.risk.black_scholes import bs_price, implied_volatility
+        from agents.risk.black_scholes import bs_price
         S, K, T, r, q, sigma = 22000.0, 22000.0, 63 / 365.0, 0.02, 0.0, 0.20
         market_price = bs_price(S, K, T, r, q, sigma, "call")
 
