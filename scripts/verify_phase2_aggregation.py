@@ -413,9 +413,9 @@ def step5_scenario(
     )
 
     # Print compact table for key scenarios: index ±1%/3%/5% × iv=0
-    print("  ── 固定 Δσ=0（純標的波動效果）──────────────────────────────────────")
+    print("  ── 固定 Δσ=0 │ 涵蓋：INDEX_DERIVATIVE_SYMBOLS（TXFF、TXO）— 不含 2330/AAPL ─")
     header = (f"  {'Shock':>7}  {'Δ-P&L':>12}  {'Γ-P&L':>12}  "
-              f"{'ν-P&L':>10}  {'Θ-P&L':>10}  {'Total':>12}")
+              f"{'ν-P&L':>10}  {'Θ-P&L':>10}  {'Total':>12}  （台指衍生品 P&L）")
     print(header)
     print(f"  {'─'*7}  {'─'*12}  {'─'*12}  {'─'*10}  {'─'*10}  {'─'*12}")
 
@@ -474,9 +474,9 @@ def step5_scenario(
               f"total={leg.total_pnl:>+10,.0f}  TWD")
 
     print()
-    print("  ── IV 情境矩陣（僅 +3% 標的波動 × 所有 IV shock）─────────────────")
+    print("  ── IV 情境矩陣 │ 固定 index_shock=+3% × 所有 IV shock │ 涵蓋：TXFF、TXO ─")
     hdr2 = (f"  {'Δσ':>7}  {'Δ-P&L':>12}  {'Γ-P&L':>12}  "
-            f"{'ν-P&L':>10}  {'Θ-P&L':>10}  {'Total':>12}")
+            f"{'ν-P&L':>10}  {'Θ-P&L':>10}  {'Total':>12}  （台指衍生品 P&L）")
     print(hdr2)
     print(f"  {'─'*7}  {'─'*12}  {'─'*12}  {'─'*10}  {'─'*10}  {'─'*12}")
     for row in result.scenarios:
