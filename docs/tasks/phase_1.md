@@ -28,6 +28,11 @@ Phase 0 完成、schema 鎖定。
 - 財報 agent 能獨立回答量化（ROIC/WACC）與質化（管理層展望）問題
 - Verifier 測試：故意讓 LLM 生成錯誤數字，驗證會被打回
 - 所有輸出數字都帶 source 指回原始 filing
+- **Verifier 必須檢查 `FinancialSnapshotWithMeta.is_restated`**：
+  - `is_restated=True` 時，Verifier 必須在 `AgentSignal.errors` 或 `key_evidence` 中
+    產生明確的重編警告（例如 `"⚠️ 部分財務數字來自重編申報，數值可信度待確認"`），
+    不得靜默接受重編數字直接輸出。
+  - Verifier 測試案例中必須包含一個 `is_restated=True` 的輸入，驗證警告確實出現。
 - `uv run pytest -q` 全過
 
 ## ⚠️ 鐵則
