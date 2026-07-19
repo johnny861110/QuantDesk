@@ -3,23 +3,22 @@ Tests for agents/risk/scenario.py
 
 Fixture portfolio
 -----------------
-Three positions, all TWD, no FX conversion needed:
+Three positions, all TWD, all index-linked (symbols in INDEX_DERIVATIVE_SYMBOLS):
 
   idx 0: "TXFF" futures  qty=-2,  mult=200,  spot_twd=22000
            → degenerate: delta=1, gamma=vega=theta=0
-           → delta_notional = 1 × (-2) × 200 × 22000 = -8 800 000
 
   idx 1: "TXO"  short call  qty=-5,  mult=50,   spot_twd=22000
            → delta=0.55, gamma=0.0002, vega=30, theta=-8
-           (synthetic values that approximate an ATM short call)
 
   idx 2: "TXO"  long put    qty=+5,  mult=50,   spot_twd=22000
            → delta=-0.45, gamma=0.0001, vega=25, theta=-6
-           (synthetic values that approximate a protective put)
 
-KEY: idx 1 short call has negative gamma_pnl on large up-moves (negative convexity).
-     We test that at +3%/+5% the gamma_pnl is clearly negative and larger than
-     the linear delta gain for that leg — and that portfolio total is negative.
+KEY:  The scenario P&L only covers index-linked positions (TXFF, TXO).
+      Individual stocks (2330.TW, AAPL) and stock options (AAPL call) are
+      excluded because their TAIEX beta is unknown — applying index_shock×1
+      would embed a silent beta=1 assumption contradicting aggregation.py's
+      unmapped_single_name_exposure design.
 
 Δt convention
 -------------
@@ -32,6 +31,7 @@ import pytest
 from agents.risk.position_loader import Position
 from agents.risk.pricing_router import GreeksResult
 from agents.risk.scenario import (
+    BETA_NOT_ESTIMATED_NOTE,
     CALENDAR_DAYS_PER_YEAR,
     INDEX_SHOCKS,
     IV_SHOCKS,
@@ -485,25 +485,102 @@ class TestEdgeCases:
         )
         assert len(result.scenarios) == 2  # 2 × 1 = 2
 
-    def test_stock_leg_no_gamma_vega_theta(
+    def test_stock_excluded_beta_not_estimated(
         self,
         convexity_greeks_map: dict[int, GreeksResult],
-        twd_spot_map: dict[str, float],
     ) -> None:
-        """Stock position has degenerate Greeks: only delta_pnl non-zero."""
+        """
+        Individual stocks (2330.TW) are NOT index-linked → excluded from P&L.
+        Applying index_shock × spot × delta would embed beta=1 silently,
+        contradicting aggregation.py's unmapped_single_name_exposure design.
+        The symbol is tracked in ScenarioResult.unmapped_symbols instead.
+        """
         stock = Position(
             symbol="2330.TW", instrument_type="stock",
             quantity=100, currency="TWD", multiplier=1.0,
         )
         spot_map = {"2330.TW": 850.0}
         result = run_scenarios([stock], {}, spot_map, days_held=1.0)
-        row = _find_row(result, index_shock=0.03, iv_shock=0.10)
-        leg = row.legs[0]
-        assert leg.gamma_pnl == 0.0
-        assert leg.vega_pnl  == 0.0
-        assert leg.theta_pnl == 0.0
-        # delta_pnl = 1 × (0.03 × 850) × 100 × 1 = 2 550 TWD
-        assert leg.delta_pnl == pytest.approx(2_550.0, rel=1e-6)
+
+        # Symbol must appear in unmapped_symbols with beta-not-estimated note
+        assert "2330.TW" in result.unmapped_symbols
+
+        # No legs: the stock is excluded from all scenario P&L
+        for row in result.scenarios:
+            assert len(row.legs) == 0
+            assert row.agg_total_pnl == 0.0
+
+
+# ─── Unmapped symbols (beta not estimated) ────────────────────────────────────
+
+class TestUnmappedSymbols:
+    """
+    Verify that non-index positions are excluded from scenario P&L and
+    tracked in ScenarioResult.unmapped_symbols.
+
+    Design contract (mirrors aggregation.py):
+    - Symbol in INDEX_DERIVATIVE_SYMBOLS → included in legs
+    - All other symbols → excluded; appear in unmapped_symbols
+    Reason: applying index_shock × spot to individual stocks silently assumes
+    beta=1, contradicting aggregation.py's unmapped_single_name_exposure.
+    """
+
+    def test_index_positions_have_no_unmapped_symbols(
+        self, scenario_result: ScenarioResult
+    ) -> None:
+        """Pure index fixture (TXFF + TXO): unmapped_symbols must be empty."""
+        assert scenario_result.unmapped_symbols == []
+
+    def test_aapl_stock_goes_to_unmapped(
+        self,
+        convexity_greeks_map: dict[int, GreeksResult],
+    ) -> None:
+        """AAPL (individual stock) is not index-linked → unmapped."""
+        aapl = _stock("AAPL", qty=100, currency="USD")
+        spot_map = {"AAPL": 195.0 * 32.5}   # pre-converted TWD
+        result = run_scenarios([aapl], {}, spot_map)
+        assert "AAPL" in result.unmapped_symbols
+        for row in result.scenarios:
+            assert len(row.legs) == 0
+
+    def test_mixed_portfolio_unmapped_excludes_stocks_keeps_index(
+        self,
+        convexity_greeks_map: dict[int, GreeksResult],
+        twd_spot_map: dict[str, float],
+    ) -> None:
+        """
+        Portfolio: TXFF (index) + 2330.TW (stock).
+        Expected: TXFF appears in legs; 2330.TW appears in unmapped_symbols.
+        """
+        txff   = _futures("TXFF", qty=-2, mult=200)
+        tsmc   = _stock("2330.TW", qty=1000)
+        spot   = {**twd_spot_map, "2330.TW": 850.0}
+
+        result = run_scenarios(
+            [txff, tsmc], greeks_map={}, twd_spot_map=spot
+        )
+
+        assert "2330.TW" in result.unmapped_symbols
+        assert "TXFF" not in result.unmapped_symbols
+        for row in result.scenarios:
+            assert len(row.legs) == 1
+            assert row.legs[0].symbol == "TXFF"
+
+    def test_duplicate_symbols_appear_once_in_unmapped(
+        self,
+        twd_spot_map: dict[str, float],
+    ) -> None:
+        """Two AAPL positions: symbol appears only once in unmapped_symbols."""
+        aapl1 = _stock("AAPL", qty=100, currency="USD")
+        aapl2 = _stock("AAPL", qty=50, currency="USD")
+        spot  = {"AAPL": 195.0 * 32.5}
+        result = run_scenarios([aapl1, aapl2], greeks_map={}, twd_spot_map=spot)
+        assert result.unmapped_symbols.count("AAPL") == 1
+
+    def test_beta_not_estimated_note_is_defined(self) -> None:
+        """BETA_NOT_ESTIMATED_NOTE must be a non-empty string."""
+        assert isinstance(BETA_NOT_ESTIMATED_NOTE, str)
+        assert len(BETA_NOT_ESTIMATED_NOTE) > 0
 
 
 # ─── Numerical spot-check ─────────────────────────────────────────────────────

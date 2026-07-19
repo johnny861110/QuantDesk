@@ -1,15 +1,21 @@
 """
 Scenario stress-tester — ΔP ≈ Δ×ΔS + ½×Γ×(ΔS)² + ν×ΔIV + Θ×Δt
 
-Design
-------
-Given a portfolio represented as a list of Positions + a Greeks map (from
-pricing_router) + pre-converted TWD spot prices, this module computes the
-first/second-order P&L approximation for each combination of:
-  • index_shock   : ΔS/S  (e.g. +0.03 = +3 % underlying move)
-  • iv_shock      : Δσ    (e.g. +0.10 = +10 vol-point absolute move)
+Scope of the index shock
+------------------------
+The ΔS shock is applied ONLY to index-linked derivatives — positions whose
+symbol is in INDEX_DERIVATIVE_SYMBOLS (TXFF, TXO, TXF, MXF, …).  These are
+the instruments whose price is mechanically tied 1:1 to the TAIEX index level;
+applying "index moves X %" to them requires no beta assumption.
 
-The formula is applied per position-leg, then summed to a portfolio total.
+Individual stocks (2330.TW, AAPL) and stock options (AAPL calls) are NOT
+included in the scenario P&L.  Their price co-movement with the index depends
+on an unknown beta, which Phase 3 will estimate.  Silently applying
+shock × 1 would embed a hidden beta=1 assumption that contradicts
+aggregation.py's explicit refusal to assume beta (unmapped_single_name_exposure).
+
+Unmapped positions are tracked in ScenarioResult.unmapped_symbols with a
+"beta 未估計" note.  The tech-debt is recorded in docs/tasks/phase_2.md.
 
 ⚠️  Δt day-count convention (must match black_scholes.py)
 -----------------------------------------------------------
@@ -19,40 +25,35 @@ bs_theta is already expressed in calendar-day units (annual_theta / 365).
 
 DO NOT switch to trading-day convention (/ 252).  Mixing conventions produces
 a systematic ~45 % theta-P&L over-estimate that is invisible to most callers.
-See docs/tasks/phase_2.md ⚠️ note and feedback memory feedback_theta_day_convention.md.
-
-Negative convexity illustration (positions in positions.yaml)
--------------------------------------------------------------
-The mixed portfolio (short TXFF + short TXO call + long TXO put) has a
-significant short-gamma exposure via the naked short call.  In a +3 %/+5 %
-shock the gamma_pnl term is negative and larger in magnitude than the linear
-delta gain, resulting in net portfolio loss — classic negative convexity.
+See docs/tasks/phase_2.md ⚠️ note.
 
 Default scenario matrix
 -----------------------
-INDEX_SHOCKS   = [-0.05, -0.03, -0.01, +0.01, +0.03, +0.05]  (6 shocks)
-IV_SHOCKS      = [-0.20, -0.10,  0.00, +0.10, +0.20]          (5 shocks)
-
-36 = 6 × 6 = wait, 6 × 5 = 30 scenarios in total.
+INDEX_SHOCKS = (−5%, −3%, −1%, +1%, +3%, +5%)  — 6 shocks
+IV_SHOCKS    = (−20 pp, −10 pp, 0, +10 pp, +20 pp)  — 5 shocks
+= 30 scenarios in total.
 
 Units
 -----
 All P&L figures are in TWD.  Callers are expected to pass TWD-denominated
-spots (twd_spot_map).  For USD positions the caller should pre-convert spot
-(spot_twd = spot_usd × fx) before building the map — the same contract as
-aggregation.py's caller contract for non-TWD positions.
+spots (twd_spot_map).  For USD-denominated index derivatives the caller must
+pre-convert (spot_twd = spot_usd × fx) — the same contract as aggregation.py.
 
 Output types
 ------------
-LegPnL        — P&L components for one position leg in one scenario
+LegPnL        — P&L components for one index-linked position leg in one scenario
 ScenarioRow   — one (index_shock, iv_shock) scenario: per-leg + aggregate
-ScenarioResult — all 30 scenarios for the portfolio
+ScenarioResult — all 30 scenarios + list of symbols excluded (beta unknown)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
+# INDEX_DERIVATIVE_SYMBOLS is the single source-of-truth for which symbols are
+# index-linked.  Importing from aggregation.py keeps this list in sync with the
+# set that aggregation routes to index_point_exposure.
+from agents.risk.aggregation import INDEX_DERIVATIVE_SYMBOLS
 from agents.risk.position_loader import Position
 from agents.risk.pricing_router import GreeksResult
 
@@ -61,6 +62,12 @@ from agents.risk.pricing_router import GreeksResult
 # Calendar-day denominator: MUST match black_scholes.py theta convention.
 # DO NOT change to 252 (trading-day basis) — see module docstring.
 CALENDAR_DAYS_PER_YEAR: int = 365
+
+# ─── Beta / unmapped note ─────────────────────────────────────────────────────
+
+# Displayed alongside symbols excluded from scenario P&L because their
+# beta vs. the index shock is unknown.  Phase 3 will supply beta estimates.
+BETA_NOT_ESTIMATED_NOTE: str = "beta 未估計，此情境下無法精確評估該部位損益"
 
 # ─── Default scenario matrix ──────────────────────────────────────────────────
 
@@ -76,17 +83,18 @@ IV_SHOCKS: tuple[float, ...] = (-0.20, -0.10, 0.00, +0.10, +0.20)
 @dataclass
 class LegPnL:
     """
-    P&L decomposition for one position leg under one scenario.
+    P&L decomposition for one index-linked position leg under one scenario.
 
-    All values in TWD.
+    Only positions whose symbol is in INDEX_DERIVATIVE_SYMBOLS appear here.
+    All values are in TWD.
 
-    delta_pnl   = delta  × ΔS × qty × mult
-    gamma_pnl   = ½ × gamma × ΔS² × qty × mult      (convexity term)
-    vega_pnl    = vega   × Δσ × qty × mult
-    theta_pnl   = theta  × Δt × qty × mult           (Δt = days / 365)
-    total_pnl   = delta_pnl + gamma_pnl + vega_pnl + theta_pnl
+    delta_pnl = delta × ΔS × qty × mult
+    gamma_pnl = ½ × gamma × ΔS² × qty × mult     (convexity term)
+    vega_pnl  = vega × Δσ × qty × mult
+    theta_pnl = theta × Δt × qty × mult           (Δt = days / 365)
+    total_pnl = sum of the above four terms
 
-    For stocks and futures (degenerate Greeks): only delta_pnl is non-zero.
+    For futures (degenerate Greeks): only delta_pnl is non-zero.
     """
     position_idx: int
     symbol: str
@@ -103,17 +111,12 @@ class ScenarioRow:
     """
     One (index_shock, iv_shock) scenario.
 
-    index_shock : fractional underlying move (e.g. 0.03 = +3 %)
-    iv_shock    : absolute IV move in decimal (e.g. 0.10 = +10 vol pts)
-    delta_S_twd : ΔS in TWD points / dollars (index_shock × spot_twd for
-                  index derivatives; same for single-name but each has its
-                  own ΔS — stored per leg in legs list)
-    legs        : LegPnL for every position in the portfolio
-    agg_delta_pnl  : Σ leg.delta_pnl
-    agg_gamma_pnl  : Σ leg.gamma_pnl    (negative = short convexity)
-    agg_vega_pnl   : Σ leg.vega_pnl
-    agg_theta_pnl  : Σ leg.theta_pnl
-    agg_total_pnl  : Σ leg.total_pnl
+    legs
+        LegPnL for every index-linked position.  Individual stocks and
+        non-index options are absent — see ScenarioResult.unmapped_symbols.
+
+    agg_* fields
+        Sums over legs only (index-linked subset of the portfolio).
     """
     index_shock: float
     iv_shock: float
@@ -128,23 +131,31 @@ class ScenarioRow:
 @dataclass
 class ScenarioResult:
     """
-    Full scenario analysis: one ScenarioRow per (index_shock, iv_shock) pair.
+    Full scenario analysis: 30 ScenarioRows (6 index × 5 IV shocks).
 
-    scenarios       : len = len(INDEX_SHOCKS) × len(IV_SHOCKS)
-    days_held       : the holding period used for theta calculation
-    index_shocks    : the shock grid used
-    iv_shocks       : the shock grid used
+    scenarios
+        One ScenarioRow per (index_shock, iv_shock) pair.
+        P&L covers index-linked positions only.
+
+    unmapped_symbols
+        Symbols whose positions were excluded because their beta vs. the
+        TAIEX index shock is unknown.  Each symbol appears at most once.
+        Tech-debt: Phase 3 will supply beta estimates to include these.
+
+    days_held, index_shocks, iv_shocks
+        Parameters used to build this result — stored for traceability.
     """
     scenarios: list[ScenarioRow]
     days_held: float
     index_shocks: tuple[float, ...]
     iv_shocks: tuple[float, ...]
+    unmapped_symbols: list[str] = field(default_factory=list)
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Internal helpers ─────────────────────────────────────────────────────────
 
 class _PositionGreeks(NamedTuple):
-    """Resolved Greeks for one position after qty/mult scaling is removed."""
+    """Per-unit Greeks for one position (before qty × mult scaling)."""
     delta: float
     gamma: float
     vega: float
@@ -157,21 +168,12 @@ def _resolve_greeks(
     greeks_map: dict[int, GreeksResult],
 ) -> _PositionGreeks | None:
     """
-    Return per-unit-per-contract Greeks for one position.
+    Return per-unit Greeks for an index-linked position.
 
-    Returns None and logs nothing if the position is invalid — callers
-    should validate positions before calling run_scenarios.
-
-    Degenerate cases
-    ----------------
-    stock / futures : delta = sign(quantity) × 1  (effectively delta=1 per unit),
-                      but to match aggregation.py convention we return delta=1
-                      for long and -1 for short… wait — actually delta per share/
-                      contract is simply 1.0 for long and we multiply by qty.
-                      So we return delta=1.0 always; qty sign handles direction.
-    option          : from greeks_map[pos_idx].
+    For futures: degenerate delta=1, rest=0.
+    For options: from greeks_map[pos_idx]; returns None if entry is missing.
     """
-    if pos.instrument_type in ("stock", "futures"):
+    if pos.instrument_type == "futures":
         return _PositionGreeks(delta=1.0, gamma=0.0, vega=0.0, theta=0.0)
 
     # option
@@ -196,23 +198,20 @@ def _compute_leg_pnl(
     delta_t: float,
 ) -> LegPnL:
     """
-    Apply the scenario formula to one position leg.
-
-    ΔP ≈ Δ×ΔS + ½×Γ×(ΔS)² + ν×ΔIV + Θ×Δt
+    Apply ΔP ≈ Δ×ΔS + ½×Γ×(ΔS)² + ν×ΔIV + Θ×Δt to one index-linked leg.
 
     ΔS = index_shock × spot_twd   (TWD)
-    Scaling: every Greek is per-unit (1 contract of 1 underlying unit).
-    Full position P&L = Greek_per_unit × qty × mult.
+    All monetary values are in TWD (assumes spot_twd was pre-converted).
     """
     delta_s = index_shock * spot_twd
 
     qty  = pos.quantity
     mult = pos.multiplier
 
-    delta_pnl = pg.delta * delta_s           * qty * mult
-    gamma_pnl = 0.5 * pg.gamma * delta_s**2 * qty * mult
-    vega_pnl  = pg.vega  * iv_shock          * qty * mult
-    theta_pnl = pg.theta * delta_t           * qty * mult
+    delta_pnl = pg.delta * delta_s            * qty * mult
+    gamma_pnl = 0.5 * pg.gamma * delta_s ** 2 * qty * mult
+    vega_pnl  = pg.vega  * iv_shock            * qty * mult
+    theta_pnl = pg.theta * delta_t             * qty * mult
 
     return LegPnL(
         position_idx    = pos_idx,
@@ -239,59 +238,66 @@ def run_scenarios(
     """
     Run the scenario matrix and return per-scenario P&L decompositions.
 
+    Only index-linked positions (symbol ∈ INDEX_DERIVATIVE_SYMBOLS) are
+    included in the P&L.  Individual stocks and non-index options are
+    tracked in ScenarioResult.unmapped_symbols with BETA_NOT_ESTIMATED_NOTE.
+
     Parameters
     ----------
-    positions     : list[Position] from position_loader (may include invalid,
-                    which are skipped with None Greeks).
+    positions     : list[Position] from position_loader.
     greeks_map    : {position_index: GreeksResult} for option legs.
-                    Stock/futures legs use degenerate Greeks (delta=1, rest=0).
-    twd_spot_map  : {symbol: spot_in_TWD}.  For USD positions the caller must
-                    pre-convert: spot_twd = spot_usd × fx_rate.
-                    This is the same caller contract as aggregation.py.
-    days_held     : holding period for theta — in calendar days.
-                    Converted to years as days / CALENDAR_DAYS_PER_YEAR (365).
-    index_shocks  : iterable of fractional underlying-price shocks (decimal).
-                    Default: INDEX_SHOCKS = (−5%, −3%, −1%, +1%, +3%, +5%).
-    iv_shocks     : iterable of absolute IV shocks (decimal points).
-                    Default: IV_SHOCKS = (−20 pp, −10 pp, 0, +10 pp, +20 pp).
+                    Futures legs use degenerate Greeks (delta=1, rest=0).
+    twd_spot_map  : {symbol: spot_in_TWD}.  For USD-denominated index
+                    derivatives the caller must pre-convert (spot × fx).
+    days_held     : holding period in calendar days → Δt = days / 365.
+    index_shocks  : fractional index-level shocks. Default: INDEX_SHOCKS.
+    iv_shocks     : absolute IV shocks (decimal). Default: IV_SHOCKS.
 
     Returns
     -------
     ScenarioResult with one ScenarioRow per (index_shock, iv_shock) pair.
-
-    Positions that are invalid (pos.is_valid is False) or lack a spot in
-    twd_spot_map are silently skipped at the leg level — the aggregate P&L
-    is computed from the available legs only.  (Mirrors aggregation.py's
-    fail-soft approach.)
+    Positions that are invalid or lack a twd_spot_map entry are silently
+    skipped (mirrors aggregation.py's fail-soft approach).
     """
-    # Δt in years (calendar-day convention — must match bs_theta)
     delta_t: float = days_held / CALENDAR_DAYS_PER_YEAR
 
-    # Pre-resolve Greeks once — avoids re-resolving per scenario
-    resolved: list[tuple[int, Position, _PositionGreeks, float] | None] = []
+    # ── Pre-classify positions ─────────────────────────────────────────────
+    # Split into index-linked (include in P&L) and unmapped (beta unknown).
+    # Resolve Greeks once — avoids repeating per scenario.
+    index_resolved: list[tuple[int, Position, _PositionGreeks, float]] = []
+    unmapped_set: set[str] = set()
+
     for pos_idx, pos in enumerate(positions):
         if not pos.is_valid:
-            resolved.append(None)
             continue
+
         spot = twd_spot_map.get(pos.symbol)
         if spot is None:
-            resolved.append(None)
             continue
+
+        if pos.symbol not in INDEX_DERIVATIVE_SYMBOLS:
+            # Individual stock / non-index option — beta vs. TAIEX unknown.
+            # Do NOT apply index_shock: that would embed beta=1 silently.
+            unmapped_set.add(pos.symbol)
+            continue
+
         pg = _resolve_greeks(pos, pos_idx, greeks_map)
         if pg is None:
-            resolved.append(None)
+            # Option without a GreeksResult — skip (missing IV/pricing)
             continue
-        resolved.append((pos_idx, pos, pg, spot))
 
+        index_resolved.append((pos_idx, pos, pg, spot))
+
+    unmapped_symbols = sorted(unmapped_set)
+
+    # ── Build scenario grid ────────────────────────────────────────────────
     scenarios: list[ScenarioRow] = []
 
     for idx_shock in index_shocks:
         for iv_shock in iv_shocks:
             legs: list[LegPnL] = []
-            for entry in resolved:
-                if entry is None:
-                    continue
-                pos_idx, pos, pg, spot_twd = entry
+
+            for pos_idx, pos, pg, spot_twd in index_resolved:
                 leg = _compute_leg_pnl(
                     pos, pos_idx, pg, spot_twd, idx_shock, iv_shock, delta_t
                 )
@@ -315,8 +321,9 @@ def run_scenarios(
             ))
 
     return ScenarioResult(
-        scenarios    = scenarios,
-        days_held    = days_held,
-        index_shocks = index_shocks,
-        iv_shocks    = iv_shocks,
+        scenarios        = scenarios,
+        days_held        = days_held,
+        index_shocks     = index_shocks,
+        iv_shocks        = iv_shocks,
+        unmapped_symbols = unmapped_symbols,
     )

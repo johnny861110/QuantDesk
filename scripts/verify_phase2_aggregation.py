@@ -38,7 +38,7 @@ from agents.risk.pricing_router import (  # noqa: E402
     OptionSpec,
     price_option,
 )
-from agents.risk.scenario import run_scenarios  # noqa: E402
+from agents.risk.scenario import BETA_NOT_ESTIMATED_NOTE, run_scenarios  # noqa: E402
 
 # ─── Placeholder market data ──────────────────────────────────────────────────
 # ⚠️ These are illustrative values. Replace with live feed in Phase 4+.
@@ -396,6 +396,8 @@ def step5_scenario(
     """
     _section("Step 5 — Scenario Stress Test（負凸性驗證）")
     print("  ΔP ≈ Δ×ΔS + ½×Γ×(ΔS)² + ν×ΔIV + Θ×Δt  (Δt = 1/365 calendar day)")
+    print("  ⚠  index_shock 只套用在 INDEX_DERIVATIVE_SYMBOLS（TXFF、TXO）。")
+    print("     個股/美股（2330、AAPL）beta 未估計，不納入情境 P&L，見 Phase 3 tech-debt。")
     print()
 
     # twd_spot_map: pre-convert USD positions — same contract as aggregation.py
@@ -429,30 +431,31 @@ def step5_scenario(
             f"{convex_flag}"
         )
 
+    # Show unmapped symbols (beta not estimated)
+    if result.unmapped_symbols:
+        _warn(f"以下部位 beta 未估計，不納入情境 P&L：{result.unmapped_symbols}")
+        _warn(f"  → {BETA_NOT_ESTIMATED_NOTE}")
+        _warn("  tech-debt: Phase 3 rolling-beta 估計完成後補入 run_scenarios(beta_map=…)")
+    else:
+        _ok("所有部位均為 index-linked，無需 beta 假設")
     print()
-    print("  ── 負凸性驗證：空 TXFF + 空 TXO call + 多 TXO put（三個核心部位）─")
+
+    print("  ── 負凸性驗證：空 TXFF + 空 TXO call + 多 TXO put ─────────────────")
     row3 = next(r for r in result.scenarios if r.index_shock == 0.03 and r.iv_shock == 0.0)
     row5 = next(r for r in result.scenarios if r.index_shock == 0.05 and r.iv_shock == 0.0)
 
-    # Core positions: TXFF (futures) + TXO positions only — user specifically asked about these
-    core_syms = {"TXFF", "TXO"}
-    core3 = sum(leg.total_pnl for leg in row3.legs if leg.symbol in core_syms)
-    core5 = sum(leg.total_pnl for leg in row5.legs if leg.symbol in core_syms)
-    ratio = abs(core5) / abs(core3) if core3 != 0.0 else float("inf")
-    print(f"  核心三部位 +3% 合計 P&L : {core3:>+12,.0f} TWD")
-    print(f"  核心三部位 +5% 合計 P&L : {core5:>+12,.0f} TWD")
+    # After the fix, legs contain ONLY index-linked positions (TXFF + TXO).
+    # 2330.TW, AAPL, AAPL-call are excluded → no need to filter by symbol.
+    total3 = row3.agg_total_pnl
+    total5 = row5.agg_total_pnl
+    ratio = abs(total5) / abs(total3) if total3 != 0.0 else float("inf")
+    print(f"  index-linked 部位 +3% 合計 P&L : {total3:>+12,.0f} TWD")
+    print(f"  index-linked 部位 +5% 合計 P&L : {total5:>+12,.0f} TWD")
     print(f"  |+5%| / |+3%| = {ratio:.4f}  （純線性應為 5/3 ≈ {5/3:.4f}；超過 → 負凸性）")
     if ratio > 5 / 3:
         _ok(f"ratio={ratio:.4f} > 5/3={5/3:.4f}  → 確認負凸性（空call short-gamma主導）")
     else:
-        _warn(f"ratio={ratio:.4f} ≤ 5/3  → 核心部位淨 gamma 趨近中性或正值")
-
-    # Full portfolio note: AAPL long call adds positive gamma, may dominate
-    agg_gamma3 = row3.agg_gamma_pnl
-    if agg_gamma3 > 0:
-        print(f"  （全組合淨 gamma P&L = +{agg_gamma3:,.0f}：AAPL long call 使全組合偏多 gamma）")
-    else:
-        print(f"  （全組合淨 gamma P&L = {agg_gamma3:,.0f}：全組合空 gamma）")
+        _warn(f"ratio={ratio:.4f} ≤ 5/3  → 淨 gamma 趨中性或正值，請核查 Greeks")
 
     print()
     print("  ── +3% 各腿 P&L 明細 ──────────────────────────────────────────────")
