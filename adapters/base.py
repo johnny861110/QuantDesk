@@ -21,7 +21,30 @@ class SourcedData(BaseModel):
 
 
 class DataSourceAdapter(ABC):
-    """所有資料源 adapter 的抽象基類。"""
+    """
+    所有資料源 adapter 的抽象基類。
+
+    Substitutability contract
+    -------------------------
+    fetch(**kwargs) 是最小化的介面簽名，目的是讓 container/registry 能持有
+    DataSourceAdapter 型別的參照（dependency inversion），不是 Liskov 意義上的
+    完全多型替換。
+
+    具體實作（如 FinMindOptionsAdapter）應定義具名參數簽名以保留靜態型別安全；
+    此時 mypy 會回報 [override] 錯誤，應加 # type: ignore[override] 並附上說明。
+
+    為何不改成 **kwargs？
+    採用 **kwargs 看似能消除 mypy 錯誤，但會把「必要參數不完整」
+    從編譯期錯誤推遲到 runtime KeyError，實際上降低了安全性。
+    更重要的是：不同 adapter 的必要參數本來就完全不同
+    （FinMind 需要 stock_id/as_of/spot_price；
+      未來券商 API 可能只需要 symbol 和帳號 token），
+    換實作時呼叫端本來就必須修改，**kwargs 只是假裝可以不改。
+
+    因此本框架選擇：
+    - 具名參數 + type: ignore[override]（呼叫端有靜態型別保護）
+    - 而非 **kwargs（呼叫端失去靜態型別保護，換來虛假的替換性）
+    """
 
     @property
     @abstractmethod
@@ -30,7 +53,13 @@ class DataSourceAdapter(ABC):
 
     @abstractmethod
     def fetch(self, **kwargs: Any) -> SourcedData:
-        """回傳帶 source + asof 的標準化資料。"""
+        """
+        回傳帶 source + asof 的標準化資料。
+
+        子類應以具名參數覆寫此方法以獲得靜態型別安全；
+        覆寫時加上 # type: ignore[override]，並說明具體參數意義。
+        詳見類別 docstring 中的 Substitutability contract 說明。
+        """
         ...
 
 
@@ -40,7 +69,16 @@ class PriceAdapter(DataSourceAdapter):
 
 
 class OptionsAdapter(DataSourceAdapter):
-    """選擇權鏈與 IV：券商API (TXO) / yfinance options chain。Greeks 引擎的輸入。"""
+    """
+    選擇權鏈與 IV：券商API (TXO) / yfinance options chain。Greeks 引擎的輸入。
+
+    Substitutability note
+    ---------------------
+    具體實作的 fetch() 參數因資料源而異，呼叫端換實作時必須同步更新。
+    FinMindOptionsAdapter: fetch(stock_id, as_of, spot_price, r, q)
+    未來國泰期貨 API 實作: 參數待定（可能只需要 symbol 和帳號設定）
+    換實作屬於 DI 替換，不要求 call site 零修改。
+    """
 
 
 class FundamentalAdapter(DataSourceAdapter):
@@ -57,3 +95,7 @@ class MacroAdapter(DataSourceAdapter):
 
 class CrossMarketAdapter(DataSourceAdapter):
     """跨市場：yfinance（美股指數）/ 台指期源。"""
+
+
+class FXAdapter(DataSourceAdapter):
+    """外匯匯率：yfinance / 中央銀行公告 / 券商報價。"""

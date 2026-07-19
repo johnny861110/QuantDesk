@@ -1,0 +1,87 @@
+# QuantDesk 持倉設定 — 人工填寫，schema 見 agents/risk/position_loader.py
+# tech-debt: 之後接券商 API（國泰期貨程式化 API）替換此檔案；
+#            PositionLoader 介面不動，只換資料源。
+#
+# ⚠️  選擇權到期日必須填未來日期，否則 position_loader 會報錯（T ≤ 0 防呆）。
+#    TXO 結算日 = 到期月第三週三；美股個股選擇權 = 到期月第三週五。
+#    此檔案的到期日請隨部位滾倉定期更新。
+#
+# ── 通用欄位（所有部位類型必填）────────────────────────────────────────────────
+#   symbol          : 代碼（台股 2330.TW、美股 AAPL、台指期 TXFF、台指選擇權 TXO）
+#   instrument_type : stock | futures | option
+#   quantity        : 正 = 多、負 = 空（股數 / 口數 / 合約數）
+#   currency        : TWD | USD
+#   multiplier      : 每 1 點 / 1 股的合約乘數（stock=1, TXO=50, TXFF=200）
+#   entry_price     : 成本價（選填；用於損益計算，不影響 Greeks）
+#
+# ── 選擇權額外欄位（instrument_type: option 時必填）──────────────────────────
+#   strike      : 履約價
+#   expiry      : 到期日 YYYY-MM-DD（TXO 為當月第三週三結算日）
+#   option_type : call | put
+#   style       : european（TXO）| american（多數美股個股選擇權）
+
+# ── 組合層級設定 ──────────────────────────────────────────────────────────────
+# hard_constraints 的 net_delta_pct_nav 分母；人工估計，每月更新。
+portfolio_nav:
+  value: 5000000.0      # 測試用：TWD 500 萬
+  currency: TWD
+
+positions:
+  # ── 現貨（stock）────────────────────────────────────────────────────────────
+  # 現貨視為退化選擇權：delta=1（多），gamma=vega=theta=0
+  - symbol: "2330.TW"
+    instrument_type: stock
+    quantity: 1000            # 多 1000 股台積電
+    entry_price: 850.0
+    currency: TWD
+    multiplier: 1.0
+
+  - symbol: "AAPL"
+    instrument_type: stock
+    quantity: 100             # 多 100 股蘋果
+    entry_price: 195.0
+    currency: USD
+    multiplier: 1.0
+
+  # ── 期貨（futures）──────────────────────────────────────────────────────────
+  # 期貨同樣退化：delta=1（多口）或 delta=-1（空口），gamma=vega=theta=0
+  - symbol: "TXFF"            # 台指期近月
+    instrument_type: futures
+    quantity: -2              # 空 2 口（指數避險）
+    entry_price: 22000.0
+    currency: TWD
+    multiplier: 200.0         # 每點 200 元
+
+  # ── 選擇權（option）─────────────────────────────────────────────────────────
+  - symbol: "TXO"             # 台指選擇權 — naked short call（疊加在空頭台指期貨部位之上，非以多頭現貨/期貨覆蓋）
+    instrument_type: option
+    quantity: -5              # 空 5 口 call
+    strike: 22500.0
+    expiry: "2026-09-16"      # 2026 年 9 月第三週三（⚠️ 滾倉時更新）
+    option_type: call
+    style: european           # TXO 是歐式選擇權
+    entry_price: 150.0
+    currency: TWD
+    multiplier: 50.0          # 每點 50 元
+
+  - symbol: "TXO"             # 台指選擇權 — protective put
+    instrument_type: option
+    quantity: 5               # 多 5 口 put
+    strike: 21000.0
+    expiry: "2026-09-16"      # 同月結算
+    option_type: put
+    style: european
+    entry_price: 80.0
+    currency: TWD
+    multiplier: 50.0
+
+  - symbol: "AAPL"            # 美股個股選擇權（美式，需 binomial tree）
+    instrument_type: option
+    quantity: 2               # 多 2 口 call
+    strike: 200.0
+    expiry: "2026-09-18"      # 2026 年 9 月第三週五（美股標準月選）（⚠️ 滾倉時更新）
+    option_type: call
+    style: american
+    entry_price: 8.50
+    currency: USD
+    multiplier: 100.0         # 每口 100 股
