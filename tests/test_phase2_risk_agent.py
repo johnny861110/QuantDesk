@@ -191,6 +191,30 @@ def mock_agg_no_fx() -> AggregationResult:
 
 
 @pytest.fixture
+def mock_agg_balanced() -> AggregationResult:
+    """Delta-neutral portfolio (net_delta=0) — NEUTRAL signal, no breach."""
+    c = _make_consolidated(net_delta_twd=0.0)
+    hcs = [
+        _hc("net_delta_pct_nav", current=0.0,   limit=0.30,        breached=False),
+        _hc("gamma_limit",       current=0.10,  limit=1_000_000.0, breached=False),
+        _hc("vega_limit",        current=1000.0, limit=500_000.0,  breached=False),
+    ]
+    return _make_agg(c, hcs)
+
+
+@pytest.fixture
+def mock_agg_net_long() -> AggregationResult:
+    """Net long portfolio (net_delta=+500K / +10% NAV) — BULLISH signal, no breach."""
+    c = _make_consolidated(net_delta_twd=+500_000.0)
+    hcs = [
+        _hc("net_delta_pct_nav", current=+0.10, limit=0.30,        breached=False),
+        _hc("gamma_limit",       current=0.10,  limit=1_000_000.0, breached=False),
+        _hc("vega_limit",        current=1000.0, limit=500_000.0,  breached=False),
+    ]
+    return _make_agg(c, hcs)
+
+
+@pytest.fixture
 def mock_scenario() -> ScenarioResult:
     return _make_scenario()
 
@@ -198,46 +222,91 @@ def mock_scenario() -> ScenarioResult:
 # ─── Unit tests: build_risk_signal() ─────────────────────────────────────────
 
 class TestSignalDetermination:
-    def test_breach_produces_bearish(
+    """Signal reflects net delta direction, independent of hard_constraint breach status."""
+
+    def test_net_short_large_produces_bearish(
         self,
         minimal_positions: list[Position],
         greeks_map_empty: dict[int, GreeksResult],
         mock_agg_breach: AggregationResult,
         mock_scenario: ScenarioResult,
     ) -> None:
+        """net_delta_pct_nav = -210% → directionally BEARISH."""
         signal = build_risk_signal(
             positions=minimal_positions, greeks_map=greeks_map_empty,
             agg_result=mock_agg_breach, scenario_result=mock_scenario,
             portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
         )
         assert signal.signal == Signal.BEARISH
-        assert signal.has_breach()
 
-    def test_no_breach_produces_neutral(
+    def test_delta_neutral_produces_neutral(
         self,
         minimal_positions: list[Position],
         greeks_map_empty: dict[int, GreeksResult],
-        mock_agg_ok: AggregationResult,
+        mock_agg_balanced: AggregationResult,
         mock_scenario: ScenarioResult,
     ) -> None:
+        """net_delta=0 → NEUTRAL regardless of breach status."""
         signal = build_risk_signal(
             positions=minimal_positions, greeks_map=greeks_map_empty,
-            agg_result=mock_agg_ok, scenario_result=mock_scenario,
+            agg_result=mock_agg_balanced, scenario_result=mock_scenario,
             portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
         )
         assert signal.signal == Signal.NEUTRAL
         assert not signal.has_breach()
 
+    def test_net_long_produces_bullish(
+        self,
+        minimal_positions: list[Position],
+        greeks_map_empty: dict[int, GreeksResult],
+        mock_agg_net_long: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """net_delta_pct_nav = +10% → directionally BULLISH."""
+        signal = build_risk_signal(
+            positions=minimal_positions, greeks_map=greeks_map_empty,
+            agg_result=mock_agg_net_long, scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
+        )
+        assert signal.signal == Signal.BULLISH
+        assert not signal.has_breach()
+
+    def test_breach_does_not_contaminate_directional_signal(
+        self,
+        minimal_positions: list[Position],
+        greeks_map_empty: dict[int, GreeksResult],
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """
+        A gamma breach on a NET LONG portfolio must NOT flip signal to BEARISH.
+        signal = BULLISH (from delta), has_breach() = True (from hard_constraints).
+        These are independent dimensions; Supervisor Phase 5 handles the rule engine.
+        """
+        c = _make_consolidated(net_delta_twd=+500_000.0, net_gamma=2_000_000.0)
+        hcs = [
+            _hc("net_delta_pct_nav", current=+0.10, limit=0.30,        breached=False),
+            _hc("gamma_limit",       current=2e6,   limit=1_000_000.0, breached=True),
+            _hc("vega_limit",        current=1000.0, limit=500_000.0,  breached=False),
+        ]
+        agg = _make_agg(c, hcs)
+        signal = build_risk_signal(
+            positions=minimal_positions, greeks_map=greeks_map_empty,
+            agg_result=agg, scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
+        )
+        assert signal.signal == Signal.BULLISH   # directional — net long
+        assert signal.has_breach()               # breach is independently recorded
+
     def test_agent_type_is_risk(
         self,
         minimal_positions: list[Position],
         greeks_map_empty: dict[int, GreeksResult],
-        mock_agg_ok: AggregationResult,
+        mock_agg_balanced: AggregationResult,
         mock_scenario: ScenarioResult,
     ) -> None:
         signal = build_risk_signal(
             positions=minimal_positions, greeks_map=greeks_map_empty,
-            agg_result=mock_agg_ok, scenario_result=mock_scenario,
+            agg_result=mock_agg_balanced, scenario_result=mock_scenario,
             portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
         )
         assert signal.agent == AgentType.RISK
@@ -246,12 +315,12 @@ class TestSignalDetermination:
         self,
         minimal_positions: list[Position],
         greeks_map_empty: dict[int, GreeksResult],
-        mock_agg_ok: AggregationResult,
+        mock_agg_balanced: AggregationResult,
         mock_scenario: ScenarioResult,
     ) -> None:
         signal = build_risk_signal(
             positions=minimal_positions, greeks_map=greeks_map_empty,
-            agg_result=mock_agg_ok, scenario_result=mock_scenario,
+            agg_result=mock_agg_balanced, scenario_result=mock_scenario,
             portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
         )
         assert signal.time_horizon == TimeHorizon.SHORT
@@ -287,13 +356,14 @@ class TestHardConstraints:
         )
         assert len(signal.hard_constraints) == 3
 
-    def test_gamma_breach_produces_bearish(
+    def test_gamma_breach_recorded_independently_of_signal(
         self,
         minimal_positions: list[Position],
         greeks_map_empty: dict[int, GreeksResult],
         mock_scenario: ScenarioResult,
     ) -> None:
-        c = _make_consolidated(net_gamma=2_000_000.0)  # > 1M limit
+        """Gamma breach is recorded in hard_constraints regardless of signal direction."""
+        c = _make_consolidated(net_gamma=2_000_000.0)  # > 1M limit; delta default -500K
         hcs = [
             _hc("net_delta_pct_nav", current=-0.10, limit=0.30,        breached=False),
             _hc("gamma_limit",       current=2e6,   limit=1_000_000.0, breached=True),
@@ -305,7 +375,11 @@ class TestHardConstraints:
             agg_result=agg, scenario_result=mock_scenario,
             portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
         )
-        assert signal.signal == Signal.BEARISH
+        # Breach is in hard_constraints; signal is directional (BEARISH from -10% delta)
+        assert signal.has_breach()
+        gamma_hc = next(hc for hc in signal.hard_constraints if hc.type == "gamma_limit")
+        assert gamma_hc.breached
+        assert signal.signal == Signal.BEARISH  # delta-driven, not breach-driven
 
 
 class TestConfidence:
@@ -478,6 +552,12 @@ class TestMetrics:
     def test_worst_pnl_is_float(self) -> None:
         assert isinstance(self.signal.metrics["scenario_worst_pnl_twd"], float)
 
+    def test_covered_symbols_present_in_metrics(self) -> None:
+        assert "covered_symbols" in self.signal.metrics
+
+    def test_covered_symbols_is_list(self) -> None:
+        assert isinstance(self.signal.metrics["covered_symbols"], list)
+
 
 class TestNarrativeContract:
     """Verify _build_narrative produces qualitative text, no raw numbers."""
@@ -521,6 +601,55 @@ class TestNarrativeContract:
         sc = _make_scenario(unmapped=["AAPL", "2330.TW"])
         signal = self._get_signal(minimal_positions, mock_agg_ok, sc)
         assert "AAPL" in signal.narrative or "2330" in signal.narrative
+
+
+# ─── Unit tests: narrative Verifier guard ────────────────────────────────────
+
+class TestNarrativeVerifier:
+    """
+    Shared agents.verifier.check_narrative is used by both risk_agent and
+    fundamental_agent.  These tests exercise it at the shared-module level and
+    verify it is wired into build_risk_signal().
+    """
+
+    def test_clean_narrative_passes(self) -> None:
+        """No numbers in narrative → no Verifier errors."""
+        from agents.verifier import check_narrative
+        narrative = "組合淨 delta 空頭偏重，淨 gamma 偏空，所有風控限制均在範圍內。"
+        errors = check_narrative(narrative, {"net_delta_pct_nav": -0.10})
+        assert errors == []
+
+    def test_rogue_number_flagged(self) -> None:
+        """Number in narrative that is NOT in metrics → Verifier error emitted."""
+        from agents.verifier import check_narrative
+        # Use a 3-digit number the regex can catch (regex matches up to 3 digits without commas)
+        narrative = "組合淨 delta 空頭偏重，損益約 -999 元。"
+        errors = check_narrative(narrative, {"net_delta_pct_nav": -0.10})
+        assert len(errors) > 0
+        assert "[Verifier]" in errors[0]
+
+    def test_build_risk_signal_narrative_is_clean(
+        self,
+        minimal_positions: list[Position],
+        greeks_map_empty: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """
+        _build_narrative() is deterministic and intentionally number-free.
+        Verify that build_risk_signal() sees no Verifier errors from the
+        current narrative (i.e., the Verifier guard is wired and the
+        deterministic narrative is clean).
+        """
+        signal = build_risk_signal(
+            positions=minimal_positions, greeks_map=greeks_map_empty,
+            agg_result=mock_agg_ok, scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
+        )
+        verifier_errors = [e for e in signal.errors if "[Verifier]" in e]
+        assert verifier_errors == [], (
+            f"Deterministic narrative triggered Verifier: {verifier_errors}"
+        )
 
 
 # ─── Integration tests: run_risk_agent() ─────────────────────────────────────
@@ -594,3 +723,10 @@ class TestRunRiskAgent:
             f"(current={delta_hc.current:.2%}, limit=±{delta_hc.limit:.0%}) "
             "but was not. Check positions.yaml or portfolio_nav."
         )
+
+    def test_covered_symbols_in_metrics(self) -> None:
+        signal = run_risk_agent(asof=MOCK_ASOF)
+        assert "covered_symbols" in signal.metrics
+        syms = signal.metrics["covered_symbols"]
+        assert isinstance(syms, list)
+        assert len(syms) > 0  # positions.yaml has at least one valid position

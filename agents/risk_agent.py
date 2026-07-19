@@ -47,6 +47,7 @@ from typing import Any, Optional, TypedDict
 from langgraph.graph import END, StateGraph
 
 from adapters.base import DataSourceAdapter
+from agents.verifier import check_narrative
 from agents.risk.aggregation import AggregationResult, aggregate
 from agents.risk.position_loader import (
     PortfolioConfig,
@@ -76,6 +77,10 @@ from schemas.agent_signal import (
 # tech-debt: Phase 4 will replace these with live FinMind prices.
 
 PLACEHOLDER_IV: float = 0.20   # 20 % annualised — used for all options
+
+# Directional threshold: |net_delta_pct_nav| > 1% NAV is considered directional.
+# Inside this band the portfolio is treated as effectively delta-neutral.
+DELTA_NEUTRAL_BAND_PCT: float = 0.01
 
 DEFAULT_SPOT_MAP: dict[str, float] = {
     "2330.TW": 850.0,      # TWD — TSMC placeholder
@@ -316,6 +321,7 @@ def build_risk_signal(
     """
     all_errors: list[str] = list(errors or [])
     c = agg_result.consolidated_twd
+    covered_symbols = sorted({p.symbol for p in positions if p.is_valid})
 
     # ── Derived scalars ───────────────────────────────────────────────────────
     nav = portfolio_nav if portfolio_nav > 0.0 else 1.0
@@ -368,6 +374,8 @@ def build_risk_signal(
         "consolidation_complete":   c.is_complete,
         "excluded_currencies":      c.excluded_currencies,
         "portfolio_nav":            portfolio_nav,
+        "covered_symbols":          covered_symbols,
+        "target_note":              "PORTFOLIO — aggregate over all positions; see covered_symbols for scope",
     }
 
     # ── Key evidence (source + asof on every item) ────────────────────────────
@@ -405,8 +413,13 @@ def build_risk_signal(
     ]
 
     # ── Signal and confidence ─────────────────────────────────────────────────
-    signal     = _determine_signal(agg_result.hard_constraints)
+    signal     = _determine_signal(net_delta_pct_nav)
     confidence = _compute_confidence(agg_result, positions, greeks_map)
+
+    narrative = _build_narrative(metrics, agg_result.hard_constraints)
+    verifier_errors = check_narrative(narrative, metrics)
+    if verifier_errors:
+        all_errors.extend(verifier_errors)
 
     # IV completely absent → degrade and warn conservatively
     if n_options > 0 and n_priced == 0:
@@ -425,7 +438,7 @@ def build_risk_signal(
         key_evidence    = key_evidence,
         hard_constraints = agg_result.hard_constraints,
         metrics         = metrics,
-        narrative       = _build_narrative(metrics, agg_result.hard_constraints),
+        narrative       = narrative,
         data_quality    = DataQuality(
             completeness  = completeness,
             staleness_sec = 0.0,   # tech-debt Phase 4: wire timestamp from adapter
@@ -437,10 +450,22 @@ def build_risk_signal(
 
 # ─── Private helpers ──────────────────────────────────────────────────────────
 
-def _determine_signal(hard_constraints: list[HardConstraint]) -> Signal:
-    """BEARISH if any constraint is breached; NEUTRAL otherwise."""
-    if any(hc.breached for hc in hard_constraints):
+def _determine_signal(net_delta_pct_nav: float) -> Signal:
+    """
+    Signal reflects directional delta exposure, NOT constraint breach status.
+
+    Breach status belongs exclusively in hard_constraints.  Supervisor Phase 5
+    applies the hard-constraint rule engine independently; contaminating signal
+    with breach status would corrupt the directional dimension.
+
+    BEARISH  : net short > 1 % of NAV
+    BULLISH  : net long  > 1 % of NAV
+    NEUTRAL  : effectively delta-neutral (|pct| ≤ 1 %)
+    """
+    if net_delta_pct_nav < -DELTA_NEUTRAL_BAND_PCT:
         return Signal.BEARISH
+    if net_delta_pct_nav > DELTA_NEUTRAL_BAND_PCT:
+        return Signal.BULLISH
     return Signal.NEUTRAL
 
 
@@ -516,7 +541,7 @@ def _build_narrative(
         )
 
     parts.append(
-        "IV 來源：placeholder（subtask 4 FinMind 接入後替換）。"
+        "IV 來源：placeholder（Phase Four FinMind 接入後替換）。"
         "數值詳見 metrics 及 key_evidence。"
     )
 

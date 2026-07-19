@@ -22,13 +22,13 @@ Design contract (CLAUDE.md §三條不可違反):
 from __future__ import annotations
 
 import os
-import re
 from datetime import UTC, datetime
 from typing import Any, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
 from adapters.fundamental_adapter import FundamentalAdapter, FinancialSnapshotWithMeta
+from agents.verifier import check_narrative as _check_narrative_shared
 from schemas.agent_signal import (
     AgentSignal,
     AgentType,
@@ -72,45 +72,6 @@ class Verifier:
     hand-crafted inputs without any mock.
     """
 
-    # Tolerance for float comparison: numbers within 0.5% are considered the same.
-    # Handles minor rounding (e.g. LLM writes "8.7%" when metric is 8.7023).
-    _REL_TOL = 0.005
-    _ABS_TOL = 0.01   # for values close to zero
-
-    # Regex: match standalone numbers including negatives, percentages, comma-sep thousands.
-    # Excludes pure year numbers (4 digits, 1990-2099) to reduce false positives.
-    _NUM_RE = re.compile(
-        r"""
-        (?<!\d)               # not preceded by digit
-        -?                    # optional negative
-        (?!(?:19|20)\d{2}(?!\d))  # exclude 4-digit years 19xx / 20xx
-        \d{1,3}(?:,\d{3})*    # integer part, optional thousands-separator
-        (?:\.\d+)?            # optional decimal
-        (?!\d)                # not followed by digit
-        """,
-        re.VERBOSE,
-    )
-
-    @classmethod
-    def _parse_numbers(cls, text: str) -> list[float]:
-        return [float(m.replace(",", "")) for m in cls._NUM_RE.findall(text)]
-
-    @classmethod
-    def _known_values(cls, metrics: dict[str, Any]) -> set[float]:
-        """Flatten all numeric leaf values from the metrics dict."""
-        result: set[float] = set()
-        for v in metrics.values():
-            if isinstance(v, (int, float)) and v == v:   # exclude NaN
-                result.add(float(v))
-        return result
-
-    @classmethod
-    def _value_matches(cls, num: float, known: set[float]) -> bool:
-        return any(
-            abs(num - kv) <= max(cls._REL_TOL * abs(kv), cls._ABS_TOL)
-            for kv in known
-        )
-
     @classmethod
     def check_is_restated(cls, snapshot: FinancialSnapshotWithMeta) -> list[str]:
         """
@@ -138,24 +99,7 @@ class Verifier:
         narrative: str,
         metrics: dict[str, Any],
     ) -> list[str]:
-        """
-        Scan the LLM-generated narrative for numbers that do NOT appear in
-        the verified metrics dict.  Any such number is flagged as an error —
-        it means the LLM hallucinated a figure rather than citing a tool output.
-
-        Returns a list of error strings (empty = all numbers verified).
-        """
-        if not narrative:
-            return []
-        known = cls._known_values(metrics)
-        errors: list[str] = []
-        for num in cls._parse_numbers(narrative):
-            if not cls._value_matches(num, known):
-                errors.append(
-                    f"[Verifier] 敘述中出現未經工具驗證的數字 {num}，"
-                    "違反「LLM 不得產出數字」原則。"
-                )
-        return errors
+        return _check_narrative_shared(narrative, metrics)
 
     @classmethod
     def check_metrics_consistent(
