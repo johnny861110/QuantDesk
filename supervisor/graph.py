@@ -37,6 +37,13 @@ SOURCE_RELIABILITY: Final[dict[AgentType, float]] = {
     # RISK: None → 走 Layer 1，不參與方向性投票
 }
 
+# ⚠️ 暫定值：hard constraint 觸發時統一壓縮至此信心值。
+# 設計理由：
+#   - 低於多數「可執行閾值」（通常 ≥ 0.50），強迫使用者先處理風控問題再行動。
+#   - 不設為 0.0，因為 horizon_breakdown 各層的分析結論仍然有效，
+#     只是最終建議層面加了強制警告；設為 0 會誤導「沒有資訊」。
+#   - Phase 6 可考慮依 breach 嚴重程度分級（critical=0.20，high=0.30，medium=0.35），
+#     目前先用單一暫定值。
 _RISK_OVERRIDE_CONFIDENCE: Final[float] = 0.35
 
 # 優先序：決定 overall_recommendation 從哪個 horizon 取
