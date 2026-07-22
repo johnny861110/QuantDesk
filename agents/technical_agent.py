@@ -39,7 +39,7 @@ import numpy as np
 from langgraph.graph import END, StateGraph
 
 from adapters.base import DataSourceAdapter, SourcedData
-from adapters.price_adapter import OHLCVData, YFinancePriceAdapter
+from adapters.price_adapter import FinMindPriceAdapter, OHLCVData, YFinancePriceAdapter
 from agents.verifier import check_narrative
 from schemas.agent_signal import (
     AgentSignal,
@@ -527,7 +527,11 @@ def _node_fetch(state: TechnicalAgentState) -> TechnicalAgentState:
     errors = list(state["pipeline_errors"])
     adapter = state["price_adapter"]
     if adapter is None:
-        adapter = YFinancePriceAdapter()
+        # 台股優先用 FinMind；其他市場用 yfinance
+        if state["market"] == "TW":
+            adapter = FinMindPriceAdapter()
+        else:
+            adapter = YFinancePriceAdapter()
 
     try:
         sourced: SourcedData = adapter.fetch(  # type: ignore[call-arg]

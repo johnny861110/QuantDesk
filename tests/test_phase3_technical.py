@@ -27,13 +27,13 @@ test_build_signal_schema     : FakePriceAdapter → valid AgentSignal with corre
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pytest
 
 from adapters.base import SourcedData
-from adapters.price_adapter import OHLCVData
+from adapters.price_adapter import OHLCVData, _parse_tw_price_rows, _strip_tw_suffix
 from agents.technical_agent import (
     _build_narrative,
     _determine_signal_and_confidence,
@@ -411,3 +411,108 @@ def test_build_signal_uptrend_is_bullish() -> None:
         f"Expected BULLISH for uptrend, got {result.signal}. "
         f"Metrics: {result.metrics}"
     )
+
+
+# ─── FinMind price adapter pure-function tests ────────────────────────────────
+
+def test_strip_tw_suffix_variants() -> None:
+    """_strip_tw_suffix must remove .TW and .TWO but leave bare codes alone."""
+    assert _strip_tw_suffix("2330.TW")  == "2330"
+    assert _strip_tw_suffix("6505.TWO") == "6505"
+    assert _strip_tw_suffix("2330")     == "2330"
+    assert _strip_tw_suffix("AAPL")     == "AAPL"   # non-TW ticker unchanged
+
+
+def _make_finmind_rows(
+    closes: Sequence[float],
+    *,
+    high_offset: float = 5.0,
+    low_offset: float = 5.0,
+    volume: float = 10_000.0,
+) -> list[dict[str, Any]]:
+    """Build synthetic FinMind TaiwanStockPrice rows for testing."""
+    rows = []
+    for i, c in enumerate(closes):
+        rows.append({
+            "date":           f"2024-{(i // 20) + 1:02d}-{(i % 20) + 1:02d}",
+            "stock_id":       "2330",
+            "open":           c - 1.0,
+            "max":            c + high_offset,
+            "min":            c - low_offset,
+            "close":          c,
+            "Trading_Volume": volume,
+            "Trading_money":  c * volume,
+            "spread":         1.0,
+            "Trading_turnover": 100,
+        })
+    return rows
+
+
+def test_parse_tw_price_rows_basic() -> None:
+    """_parse_tw_price_rows: field mapping and array shapes are correct."""
+    closes = [100.0, 102.0, 98.0, 105.0]
+    rows   = _make_finmind_rows(closes, high_offset=3.0, low_offset=2.0)
+    data   = _parse_tw_price_rows(rows, "2330.TW")
+
+    assert data.symbol == "2330.TW"
+    assert data.market == "TW"
+    assert len(data.close)  == 4
+    assert len(data.dates)  == 4
+    np.testing.assert_array_almost_equal(data.close,  closes)
+    np.testing.assert_array_almost_equal(data.high,   [c + 3.0 for c in closes])
+    np.testing.assert_array_almost_equal(data.low,    [c - 2.0 for c in closes])
+    np.testing.assert_array_almost_equal(data.volume, [10_000.0] * 4)
+
+
+def test_parse_tw_price_rows_sorting() -> None:
+    """_parse_tw_price_rows must sort ascending by date even if rows arrive out of order."""
+    rows = [
+        {"date": "2024-01-03", "stock_id": "2330", "open": 99.0, "max": 105.0,
+         "min": 97.0, "close": 103.0, "Trading_Volume": 1000.0,
+         "Trading_money": 103000.0, "spread": 1.0, "Trading_turnover": 10},
+        {"date": "2024-01-01", "stock_id": "2330", "open": 98.0, "max": 102.0,
+         "min": 96.0, "close": 100.0, "Trading_Volume": 1000.0,
+         "Trading_money": 100000.0, "spread": 1.0, "Trading_turnover": 10},
+        {"date": "2024-01-02", "stock_id": "2330", "open": 100.0, "max": 104.0,
+         "min": 98.0, "close": 101.0, "Trading_Volume": 1000.0,
+         "Trading_money": 101000.0, "spread": 1.0, "Trading_turnover": 10},
+    ]
+    data = _parse_tw_price_rows(rows, "2330")
+    # dates must be ascending
+    assert data.dates[0] < data.dates[1] < data.dates[2]
+    # close values must follow sorted date order
+    np.testing.assert_array_almost_equal(data.close, [100.0, 101.0, 103.0])
+
+
+def test_finmind_adapter_fetch_uses_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    FinMindPriceAdapter.fetch() must call _fetch_raw and return correct OHLCVData.
+
+    Monkeypatches _fetch_raw so no real network call is made.
+    """
+    from adapters.price_adapter import FinMindPriceAdapter
+
+    closes = list(np.linspace(500.0, 550.0, 10))
+    fake_rows = _make_finmind_rows(closes)
+
+    adapter = FinMindPriceAdapter(api_token="test_token")
+    monkeypatch.setattr(adapter, "_fetch_raw", lambda *_: fake_rows)
+
+    sourced = adapter.fetch(symbol="2330.TW", period="3mo")
+    ohlcv: OHLCVData = sourced.payload
+
+    assert sourced.source == "finmind_taiwan_stock_price"
+    assert len(ohlcv.close) == 10
+    assert ohlcv.close[-1] == pytest.approx(550.0)
+    assert sourced.asof == ohlcv.dates[-1]
+
+
+def test_finmind_adapter_empty_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FinMindPriceAdapter.fetch() must raise ValueError when no rows returned."""
+    from adapters.price_adapter import FinMindPriceAdapter
+
+    adapter = FinMindPriceAdapter()
+    monkeypatch.setattr(adapter, "_fetch_raw", lambda *_: [])
+
+    with pytest.raises(ValueError, match="no data"):
+        adapter.fetch(symbol="9999.TW")

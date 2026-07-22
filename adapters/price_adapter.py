@@ -1,30 +1,50 @@
 """
-Price (OHLCV) adapter — Yahoo Finance implementation via yfinance.
+Price (OHLCV) adapters — FinMind (台股優先) + Yahoo Finance (美股後備).
 
-Interface
----------
-YFinancePriceAdapter.fetch(symbol, period, interval) → SourcedData(payload=OHLCVData, ...)
+Implementations
+---------------
+FinMindPriceAdapter   台股日線 — FinMind TaiwanStockPrice（優先）
+YFinancePriceAdapter  通用日線 — Yahoo Finance yfinance（美股 / 非台股）
 
-The payload is an OHLCVData dataclass containing numpy arrays (close, high, low,
-open_, volume) and a parallel list of datetime objects (dates), all sorted
-chronologically oldest → newest.
+Both return SourcedData(payload=OHLCVData, ...).
+OHLCVData holds numpy arrays (close, high, low, open_, volume) and a parallel
+list of datetime objects (dates), all sorted chronologically oldest → newest.
+
+Design
+------
+FinMindPriceAdapter follows the same _fetch_raw / _parse_rows split as
+FinMindOptionsAdapter: _fetch_raw() is the only method that performs network
+I/O and can be subclassed or monkeypatched in tests.
 
 tech-debt
 ---------
-- Yahoo Finance data has 15-min+ delay for equities and is not tick-precise.
-  Replace with a broker or Bloomberg feed for production.
-- Column-level MultiIndex handling covers newer yfinance versions; tested against
-  yfinance ≥ 0.2.
+- FinMind free tier is rate-limited; replace with broker API when available.
+- YFinancePriceAdapter has 15-min+ delay; not for production tick data.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
 
 from adapters.base import PriceAdapter, SourcedData
+
+# ─── FinMind constants (shared with options_adapter) ─────────────────────────
+
+FINMIND_API_URL: str = "https://api.finmindtrade.com/api/v4/data"
+FINMIND_TIMEOUT_SEC: int = 30
+FINMIND_PRICE_DATASET: str = "TaiwanStockPrice"
+
+# Period string → calendar days look-back
+_PERIOD_DAYS: dict[str, int] = {
+    "1mo":  30,
+    "3mo":  90,
+    "6mo": 180,
+    "1y":  365,
+    "2y":  730,
+}
 
 
 @dataclass
@@ -146,3 +166,148 @@ class YFinancePriceAdapter(PriceAdapter):
             source=self.source_name,
             asof=asof,
         )
+
+
+class FinMindPriceAdapter(PriceAdapter):
+    """
+    台股日線行情 adapter — FinMind TaiwanStockPrice。
+
+    台股優先選擇此 adapter（symbol 含 .TW / .TWO 結尾，或純四位數字代碼）。
+    FinMind 欄位對照：
+        max             → high
+        min             → low
+        open            → open_
+        close           → close
+        Trading_Volume  → volume
+
+    Design: _fetch_raw() isolates network I/O so tests can subclass and
+    override it without touching the real FinMind API — same pattern as
+    FinMindOptionsAdapter.
+
+    Usage
+    -----
+        adapter = FinMindPriceAdapter(api_token="YOUR_TOKEN")
+        data    = adapter.fetch(symbol="2330.TW", period="6mo")
+        ohlcv   = data.payload   # OHLCVData
+        close   = ohlcv.close    # np.ndarray, newest value at [-1]
+    """
+
+    def __init__(self, api_token: str = "") -> None:
+        self._token = api_token
+
+    @property
+    def source_name(self) -> str:  # type: ignore[override]
+        return "finmind_taiwan_stock_price"
+
+    def fetch(  # type: ignore[override]
+        self,
+        symbol: str,
+        period: str = "6mo",
+        interval: str = "1d",
+        **kwargs: Any,
+    ) -> SourcedData:
+        """
+        Fetch OHLCV bars for *symbol* from FinMind TaiwanStockPrice.
+
+        Parameters
+        ----------
+        symbol   : Taiwan ticker with or without suffix, e.g. "2330.TW" or "2330".
+        period   : History window — "1mo", "3mo", "6mo" (default), "1y", "2y".
+                   Converted to (start_date, end_date) internally.
+        interval : Accepted but ignored — FinMind only provides daily bars.
+
+        Returns
+        -------
+        SourcedData with:
+            payload : OHLCVData (arrays sorted oldest → newest)
+            source  : "finmind_taiwan_stock_price"
+            asof    : datetime of the last available bar
+
+        Raises
+        ------
+        ValueError : if FinMind returns no rows for the requested period.
+        requests.HTTPError : on non-2xx HTTP response.
+        """
+        stock_id = _strip_tw_suffix(symbol)
+        end_dt   = date.today()
+        days     = _PERIOD_DAYS.get(period, 180)
+        start_dt = end_dt - timedelta(days=days)
+
+        rows = self._fetch_raw(stock_id, start_dt, end_dt)
+        if not rows:
+            raise ValueError(
+                f"FinMind TaiwanStockPrice returned no data for {stock_id!r} "
+                f"({start_dt} → {end_dt}).  Check the stock_id and date range."
+            )
+
+        payload = _parse_tw_price_rows(rows, symbol)
+        return SourcedData(
+            payload=payload,
+            source=self.source_name,
+            asof=payload.dates[-1],
+        )
+
+    def _fetch_raw(
+        self,
+        stock_id: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        """
+        Call FinMind TaiwanStockPrice and return raw row list.
+
+        This is the **only** method that performs network I/O.
+        Override or monkeypatch this in tests instead of hitting the real API.
+        """
+        import requests  # lazy import — only needed for real network calls
+
+        params: dict[str, Any] = {
+            "dataset":    FINMIND_PRICE_DATASET,
+            "data_id":    stock_id,
+            "start_date": start_date.isoformat(),
+            "end_date":   end_date.isoformat(),
+            "token":      self._token,
+        }
+        resp = requests.get(FINMIND_API_URL, params=params, timeout=FINMIND_TIMEOUT_SEC)
+        resp.raise_for_status()
+        return resp.json().get("data", [])  # type: ignore[no-any-return]
+
+
+# ─── Pure helpers (unit-testable, no I/O) ────────────────────────────────────
+
+def _strip_tw_suffix(symbol: str) -> str:
+    """Remove .TW / .TWO suffix to obtain FinMind stock_id."""
+    for suffix in (".TWO", ".TW"):
+        if symbol.upper().endswith(suffix):
+            return symbol[: -len(suffix)]
+    return symbol
+
+
+def _parse_tw_price_rows(rows: list[dict[str, Any]], original_symbol: str) -> OHLCVData:
+    """
+    Convert raw FinMind TaiwanStockPrice rows → OHLCVData.
+
+    Pure function — no network I/O.  Input rows must be non-empty.
+    FinMind field names: date, open, max (high), min (low), close, Trading_Volume.
+    Rows are sorted ascending by date (FinMind usually delivers in order, but
+    we sort explicitly for safety).
+    """
+    rows_sorted = sorted(rows, key=lambda r: r["date"])
+
+    dates:  list[datetime] = [datetime.fromisoformat(r["date"]) for r in rows_sorted]
+    close  = np.array([float(r["close"])           for r in rows_sorted], dtype=np.float64)
+    high   = np.array([float(r["max"])             for r in rows_sorted], dtype=np.float64)
+    low    = np.array([float(r["min"])             for r in rows_sorted], dtype=np.float64)
+    open_  = np.array([float(r["open"])            for r in rows_sorted], dtype=np.float64)
+    volume = np.array([float(r["Trading_Volume"])  for r in rows_sorted], dtype=np.float64)
+
+    return OHLCVData(
+        symbol=original_symbol,
+        market="TW",
+        close=close,
+        high=high,
+        low=low,
+        open_=open_,
+        volume=volume,
+        dates=dates,
+    )
