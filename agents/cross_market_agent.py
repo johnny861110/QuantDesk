@@ -207,24 +207,55 @@ def detect_divergence(
         return (target_cum > 0) == (ref_cum > 0)
 
 
-def classify_regime(corr_60d: float, diverging: bool) -> str:
+def classify_regime(
+    corr_60d: float,
+    diverging: bool,
+    corr_20d: float = float("nan"),
+) -> str:
     """
     Returns one of: "strong_coupling", "moderate_coupling",
-                    "decoupled", "negative_coupling", "divergent"
+                    "decoupled", "short_term_counter",
+                    "negative_coupling", "divergent"
 
-    Priority: divergent overrides all other regimes.
+    Priority chain (highest → lowest):
+      1. divergent      — divergence_detected=True (regime rupture, overrides all)
+      2. corr_60d-based — long window is statistically stable (≥60 days)
+         strong_coupling (>0.6), moderate_coupling (0.3–0.6),
+         decoupled (-0.3–0.3), negative_coupling (<-0.3)
+      3. short_term_counter — corr_60d is unavailable (nan) OR near zero,
+         AND corr_20d < -CORR_THRESHOLD.
+         Meaning: 20-day window shows active counter-movement even though the
+         long-term relationship hasn't been confirmed yet (or regime just flipped).
+         NOT a "high-volatility" artifact — real examples include tariff-shock
+         periods where one market absorbed external shocks independently.
+      4. decoupled      — fallback when neither long nor short signal is clear.
+
+    Note on "short_term_counter" vs "negative_coupling":
+      negative_coupling  → corr_60d < -0.30  (60-day structural inversion)
+      short_term_counter → corr_20d < -0.30 while corr_60d is neutral/nan
+                           (20-day counter-movement, long regime not yet confirmed)
     """
     if diverging:
         return "divergent"
-    if np.isnan(corr_60d):
-        return "decoupled"
-    if corr_60d > 0.6:
-        return "strong_coupling"
-    if corr_60d > 0.3:
-        return "moderate_coupling"
-    if corr_60d > -0.3:
-        return "decoupled"
-    return "negative_coupling"
+
+    # Long window available and meaningful — use it as primary signal
+    if not np.isnan(corr_60d):
+        if corr_60d > 0.6:
+            return "strong_coupling"
+        if corr_60d > 0.3:
+            return "moderate_coupling"
+        if corr_60d >= -0.3:
+            # Long window shows near-zero correlation.
+            # Check if short window has already flipped negative.
+            if not np.isnan(corr_20d) and corr_20d < -CORR_THRESHOLD:
+                return "short_term_counter"
+            return "decoupled"
+        return "negative_coupling"
+
+    # Long window not yet available (< LONG_WINDOW bars)
+    if not np.isnan(corr_20d) and corr_20d < -CORR_THRESHOLD:
+        return "short_term_counter"
+    return "decoupled"
 
 
 # ─── Composite metrics computation ────────────────────────────────────────────
@@ -301,8 +332,9 @@ def _compute_all_metrics(data: CrossMarketData) -> dict[str, Any]:
     # Divergence detection
     divergence_detected = detect_divergence(tw_ret, us_ret, tw_us_corr_60d)
 
-    # Regime classification
-    regime = classify_regime(tw_us_corr_60d, divergence_detected)
+    # Regime classification — pass corr_20d so short-term counter-movement
+    # is captured when corr_60d is neutral or unavailable.
+    regime = classify_regime(tw_us_corr_60d, divergence_detected, tw_us_corr_20d)
 
     # 5-day cumulative returns
     window5 = DIVERGENCE_WINDOW
@@ -378,11 +410,12 @@ def _build_narrative(metrics: dict[str, Any], signal: Signal) -> str:
     divergence_detected: bool = bool(metrics.get("divergence_detected", False))
 
     regime_map: dict[str, str] = {
-        "strong_coupling":   "台美市場高度正向連動",
-        "moderate_coupling": "台美市場中度正向連動",
-        "decoupled":         "台美市場連動性偏低，各自獨立走勢",
-        "negative_coupling": "台美市場呈反向連動",
-        "divergent":         "台美市場出現連動背離",
+        "strong_coupling":    "台美市場高度正向連動",
+        "moderate_coupling":  "台美市場中度正向連動",
+        "decoupled":          "台美市場連動性偏低，各自獨立走勢",
+        "short_term_counter": "近期台美市場出現短期反向走勢，長期結構仍待觀察",
+        "negative_coupling":  "台美市場呈反向連動",
+        "divergent":          "台美市場出現連動背離",
     }
     regime_desc = regime_map.get(regime, "台美市場連動狀態未知")
 

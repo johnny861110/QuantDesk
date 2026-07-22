@@ -282,6 +282,27 @@ if any agent.hard_constraints[].breached == true:
 - **不做**：不算數字、不決定要不要忽略硬約束、不隨意調權重。
 - **只做**：把上述結構化的分層結論轉成給人看的、帶引用的白話投研摘要。
 
+### 5.3 cross_market agent 的特殊地位（規則引擎強制）
+
+**cross_market agent 的 `signal` 欄位不參與 Supervisor 的方向性投票／仲裁，僅作為其他 agent 判斷時的背景脈絡。**
+
+技術理由：
+- cross_market 輸出的是市場 regime（台美連動結構），不是標的本身的方向性觀點。
+- 它的 AgentSignal 中 `metrics["is_background_only"] == True`，此欄位是機器可讀的旗標。
+
+**Supervisor 規則引擎必須實作以下強制行為**：
+```python
+# Phase 5 實作時必須遵守——不得讓 LLM 自由裁量
+if signal.agent == AgentType.CROSS_MARKET:
+    # 排除出方向性投票池
+    skip_directional_vote = True
+    # 但 regime 資訊仍傳入 LLM narrative context（作為背景說明）
+    background_context.append(signal)
+```
+
+cross_market signal 的 BEARISH 只表示「台美連動出現背離（regime 不穩定）」，
+**不代表標的看空**，若直接納入等權投票會錯誤壓低多頭共識。
+
 ---
 
 ## 6. 資料源 Adapter 設計

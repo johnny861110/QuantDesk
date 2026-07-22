@@ -200,7 +200,7 @@ def test_detect_divergence_false() -> None:
 # ─── Regime classification tests ─────────────────────────────────────────────
 
 def test_classify_regime_all_cases() -> None:
-    """Test each of the 5 regime strings."""
+    """Test each of the 6 regime strings."""
     assert classify_regime(0.75, False) == "strong_coupling"
     assert classify_regime(0.45, False) == "moderate_coupling"
     assert classify_regime(0.10, False) == "decoupled"
@@ -209,6 +209,28 @@ def test_classify_regime_all_cases() -> None:
     assert classify_regime(0.75, True) == "divergent"
     assert classify_regime(-0.50, True) == "divergent"
     assert classify_regime(0.10, True) == "divergent"
+
+
+def test_classify_regime_short_term_counter() -> None:
+    """
+    short_term_counter: corr_20d < -0.30 while corr_60d is neutral or unavailable.
+
+    Real example: 2026-03-09 to 2026-04-07 (tariff-shock period).
+    Taiwan absorbed the shock first while US partially rebounded → corr20=-0.29,
+    corr60 near 0 or nan.  Should NOT be classified as "decoupled" (which implies
+    no clear relationship) but as "short_term_counter" (active counter-movement).
+    """
+    # corr60 nan (early in history, < 60 bars)
+    assert classify_regime(float("nan"), False, corr_20d=-0.35) == "short_term_counter"
+    # corr60 near zero (decoupled zone) but corr20 is negative
+    assert classify_regime(0.05, False, corr_20d=-0.31) == "short_term_counter"
+    assert classify_regime(-0.10, False, corr_20d=-0.45) == "short_term_counter"
+    # corr20 negative but above threshold → still decoupled
+    assert classify_regime(0.05, False, corr_20d=-0.20) == "decoupled"
+    # corr60 already negative_coupling → corr20 doesn't change the label
+    assert classify_regime(-0.50, False, corr_20d=-0.45) == "negative_coupling"
+    # diverging overrides short_term_counter
+    assert classify_regime(float("nan"), True, corr_20d=-0.45) == "divergent"
 
 
 # ─── Full pipeline / schema tests ─────────────────────────────────────────────
