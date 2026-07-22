@@ -822,6 +822,28 @@ class TestIVMissingFailSafe:
                 f"Expected '1/2' count in constraint {hc.type!r} detail: {hc.detail!r}"
             )
 
+    def test_partial_iv_failure_sets_verifiable_false(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """Constraints must be machine-readable as unverifiable, not just text-annotated."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        for hc in signal.hard_constraints:
+            assert hc.verifiable is False, (
+                f"Constraint {hc.type!r} should have verifiable=False when IV is missing; "
+                f"got verifiable={hc.verifiable!r}"
+            )
+
     def test_iv_missing_count_in_metrics(
         self,
         _partial_iv_positions: list[Position],
@@ -873,3 +895,4 @@ class TestIVMissingFailSafe:
         assert signal.confidence == pytest.approx(1.0)
         for hc in signal.hard_constraints:
             assert "IV缺失" not in (hc.detail or "")
+            assert hc.verifiable is True

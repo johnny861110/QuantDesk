@@ -434,6 +434,7 @@ def build_risk_signal(
                 limit=hc.limit,
                 breached=hc.breached,
                 detail=(hc.detail or "") + iv_note,
+                verifiable=False,   # Greeks underestimated; breached=False is unreliable
             )
             for hc in agg_result.hard_constraints
         ]
