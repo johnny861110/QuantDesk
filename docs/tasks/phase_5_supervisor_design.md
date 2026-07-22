@@ -153,7 +153,7 @@ if breached:
 **規則**（spec §5.1①）：
 - 任何 `hard_constraints[].breached == True` → 最終建議強制降級
 - 可由任意 agent 觸發（risk、fundamental 均可）
-- LLM 接收 breached 清單但**不得決定是否忽略**
+- 強制降級由規則引擎執行，**LLM 完全不參與此層**（Phase 5 實作拍板）
 
 ### Layer 2：時間框架分層（不強融成單一結論）
 
@@ -182,10 +182,14 @@ SOURCE_RELIABILITY = {
     AgentType.MACRO:       0.85,  # 總經有 TD-MACRO-01 暫定值
     AgentType.TECHNICAL:   0.80,
     AgentType.NEWS:        0.60,  # LLM 可能降級
-    AgentType.CROSS_MARKET: 0.0,  # 排除方向性投票（§5.3）
-    AgentType.RISK:        None,  # 風控不參與方向投票，走 Layer 1
+    # CROSS_MARKET / RISK 不在此 dict — 由 _should_exclude_from_directional_vote() 排除
 }
-# 低信心訊號（confidence < 0.20）自動排除出加權池
+# 排除條件（Phase 5 實作拍板，見 _should_exclude_from_directional_vote()）：
+#   1. CROSS_MARKET → 永遠排除（spec §5.3）
+#   2. RISK → 走 Layer 1，不參與方向投票
+#   3. completeness == 0.0 → 明確降級旗標（LLM 失敗 or 無近期事件）
+# 注：原設計曾有「confidence < 0.20 自動排除」，實作階段廢止——
+#     completeness==0.0 已涵蓋所有已知降級情境，不需要隱性閾值猜測。
 ```
 
 ---
@@ -339,7 +343,8 @@ assert supervisor_output.risk_override == True
 **理由**：
 - spec §5.1②：「不把六個 agent 硬融成一句話，而是按 time_horizon 分層呈現」
 - 「技術面(short)看空 + 財報(long)看多」是完全正常的分歧，強融成 NEUTRAL 會失去資訊
-- Supervisor LLM 的工作是「把分層結論轉成給人看的白話說明」，不是「選邊站」
+- Supervisor narrative 層採確定性模板（Phase 5 實作拍板，見下方第二節補充），
+  工作是「把分層結論轉成結構化的白話說明」，不是「選邊站」
 
 **驗證點**：
 ```python
@@ -389,10 +394,16 @@ SHORT: 有效貢獻 = TECHNICAL(BULLISH, weight=0.56) + NEWS(weight≈0) → BUL
 **期望輸出**：
 
 ```
-SHORT 層結果：BULLISH（信心 0.70，主導：TECHNICAL）
-NEWS 降級說明：新聞面訊號因 LLM 分析失敗（confidence floor 0.10，
-              completeness=0），本次分析中排除出加權池。
-              下次分析仍包含新聞來源，建議補充手動確認。
+SHORT 層：【short】bullish（方向一致度 100%，底層信心 0.70，僅單一來源：technical）
+  ↑ NEWS 已排除（completeness=0.0, llm_analysis_failed）
+  ↑ consensus_share=1.00（無對立票），evidence_confidence=0.70（TECHNICAL raw conf=0.70, compl=1.0）
+
+MEDIUM 層：【medium】bullish（方向一致度 100%，底層信心 0.402，僅單一來源：macro）
+  ↑ evidence_confidence = 0.60 × 0.67 = 0.402
+  ↑ MACRO(conf=0.60, compl=0.67) → compl 在分子不抵銷，正確反映 33% 資料缺失的懲罰
+  ↑ ⚠️ 注意：舊公式（bug）會輸出 0.60（compl 在分子分母互消），Phase 5 已修正
+
+NEWS 排除說明：completeness=0.0（llm_analysis_failed），排除出加權池
 ```
 
 **理由**：
@@ -519,9 +530,19 @@ class SupervisorOutput:
     exclusion_reasons: dict[AgentType, str]
     background_context: list[AgentSignal]   # cross_market + other background
     # Final
-    overall_narrative: str   # LLM 產出，引用 horizon_breakdown 的結構化結論
+    overall_narrative: str   # 確定性模板產出（Phase 5 不使用 LLM，見下方補充說明）
     raw_agent_signals: list[AgentSignal]
 ```
+
+> **Phase 5 實作拍板：narrative 完全採確定性模板，不引入 LLM**
+>
+> 理由：
+> - Supervisor 是系統最終輸出層，引入 LLM 在此層會讓「最後一哩路」變成不可控的生成風險。
+>   Layer 1/2/3 已把所有結構化判斷做完，narrative 只是格式化輸出，不需要 LLM 的語言能力。
+> - 若 narrative 產出有錯，確定性模板比 LLM hallucination 更容易診斷和修復。
+> - 如需更自然流暢的語言表達，可在 Phase 6 視需求在 `overall_narrative` 之上加一層
+>   LLM 潤飾（接收結構化 narrative 字串作為 prompt context，輸出潤飾版），
+>   但 **Phase 5 不引入此層**。
 
 ### cross_market 排除檢查（強制，不由 LLM 決定）
 
@@ -562,28 +583,34 @@ def effective_weight(sig: AgentSignal) -> float:
 
 ---
 
-## 五、待 Review 的開放問題
+## 五、開放問題（全部已拍板）
 
-1. **SupervisorOutput schema**：上述 dataclass 設計是否符合 Phase 5 的 AgentSignal schema
-   延伸方向？還是 Supervisor 應該也輸出一個 AgentSignal（agent=SUPERVISOR）？
+1. ~~**SupervisorOutput schema**~~：**已拍板**。
+   採獨立 `SupervisorOutput` dataclass（`supervisor/signal.py`），不套用 `AgentSignal`。
+   兩者職責不同：AgentSignal 是單一 domain 的 signal；SupervisorOutput 是多 domain 融合的仲裁結論。
 
-2. **overall_narrative 的 LLM 溫度**：Supervisor LLM 的 system prompt 要明確禁止哪些行為？
-   （不能忽略 hard constraint、不能自行決定 cross_market 是否參與投票⋯⋯）
+2. ~~**overall_narrative 的 LLM 溫度**~~：**已拍板（Phase 5 完全不使用 LLM）**。
+   narrative 採確定性模板（`_build_narrative()` 在 `supervisor/graph.py`）。
+   理由：Supervisor 是系統最終輸出層，不可控的 LLM 生成在此層風險過高；
+   確定性模板更容易診斷和審計。若 Phase 6 需要更自然的語言，可在此之上加一層 LLM 潤飾，
+   但該層只能接收結構化 narrative 作為 context，不得重新裁量任何仲裁結論。
 
-3. **horizon_breakdown 空層的處理**：若 MEDIUM 層只有 CROSS_MARKET（排除後為空），
-   該層顯示「無方向性訊號」還是繼承 SHORT 層的結論？
+3. ~~**horizon_breakdown 空層的處理**~~：**已拍板**。
+   排除 cross_market 後若投票池為空 → 顯示「無方向性訊號（投票池為空）」，
+   不繼承其他層結論。實作於 `_compute_horizon_result()` 的空 contributors 分支。
 
-4. **Source reliability 暫定值**：0.80/0.85/0.60 完全是主觀設定，
-   Phase 6 是否建立歷史回測機制讓 reliability 動態調整？
+4. ~~**Source reliability 暫定值**~~：**已拍板為暫定值**。
+   `SOURCE_RELIABILITY` 在 `supervisor/graph.py` 標記為 `⚠️ 暫定值`。
+   Phase 6 計畫建立歷史回測機制（訊號正確率 vs 後驗標準答案）讓 reliability 動態調整。
+   Phase 5 維持靜態值：FUNDAMENTAL=1.0, MACRO=0.85, TECHNICAL=0.80, NEWS=0.60。
 
 5. ~~**信心門檻 0.15**~~：**已拍板**。`_should_exclude_from_directional_vote()` 移除
    `confidence <= 0.15` 條件，只保留 `completeness == 0.0` 這個明確旗標。
    理由：明確旗標優於隱性閾值——confidence 數值無法區分「正常低信心」與
    「降級輸出的底線值」；completeness==0.0 已完整覆蓋 news LLM failure 和
-   macro no_recent_events 兩種已知降級情境。未來若有 agent 需要表達
-   「confidence 很低但不是 degraded」，用 `metrics["degraded"]=False` 明確標註，
-   不靠 Supervisor 猜測數值代表什麼。
+   macro no_recent_events 兩種已知降級情境。
 
 ---
 
-*停止點：以上為設計文件，未修改任何 .py 程式碼。待 review 確認後再開始 supervisor/graph.py 實作。*
+*Phase 5 實作完成（supervisor/graph.py + supervisor/signal.py + tests/test_phase5_supervisor.py）。
+設計文件更新截止點：cba33e7（補迴歸測試）。*
