@@ -1,5 +1,13 @@
 # Phase 4 — 新聞 + 總經 Agent（可平行）
 
+## ⚠️ 平行開發前置提醒（Phase 2 教訓）
+- pyproject.toml / uv.lock 是全域共用檔案，如果 Phase 3、Phase 4 要平行開跑，
+  兩邊需要的新套件（技術指標庫如 pandas-ta、新聞/總經 SDK）建議先在 main 上
+  一次性 uv add 加好，避免兩條 branch 各自加套件互撞。
+- 每次 commit 前依序：uv run ruff check . → uv run mypy . → uv run pytest -q，
+  三關全過才能 push，不能只跑 pytest。
+- narrative 數字檢查一律呼叫 agents/verifier.py 的 check_narrative()，不要各寫一份。
+
 ## 新聞 Agent (agents/news_agent.py)
 - agentic RAG：檢索 → 事件去重（同事件多家轉載）→ 來源可信度加權 → 摘要 → 情緒判斷
 - 明確區分「已發生事實」與「市場傳聞」，反映在 confidence / data_quality
