@@ -664,3 +664,173 @@ class TestSupervisorOutputStructure:
         result = Supervisor().aggregate(signals)
         # LONG(BULLISH) should win over SHORT(BEARISH) in overall_recommendation
         assert result.overall_recommendation == Signal.BULLISH
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 迴歸測試：evidence_confidence 公式 — completeness 不可在分母消除
+#
+# 修正記錄（commit 25446bf）：
+#   舊公式 Σ(c×bw)/Σ(bw)，bw = compl×rel
+#   → compl 同時出現在分子與分母，單一來源時互相抵銷
+#   → MACRO(conf=0.60, compl=0.67) 與 MACRO(conf=0.60, compl=1.00) 輸出相同值 0.60 (BUG)
+#
+#   新公式 Σ(eff_weight) / Σ(rel)，eff_weight = conf×compl×rel
+#   → compl 只在分子，compl<1.0 時正確壓低 evidence_confidence
+#   → MACRO(conf=0.60, compl=0.67) → 0.60 × 0.67 = 0.402 (CORRECT)
+#
+# 若有人把公式改回舊版，這組測試會立即失敗。
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestEvidenceConfidenceCompletenessRegression:
+    """迴歸測試：evidence_confidence 公式中 completeness 不可被分母消除。
+
+    核心不變式：
+      對任意單一貢獻 agent，若 completeness < 1.0，則
+      evidence_confidence 必須嚴格小於 raw confidence。
+
+    等價陳述（單一來源時）：
+      evidence_confidence = raw_confidence × completeness
+    """
+
+    def test_single_source_partial_completeness_lower_than_raw_confidence(self) -> None:
+        """主斷言：單一貢獻者 compl=0.67 → evconf 嚴格 < raw confidence（0.60）。"""
+        signals = [
+            _sig(
+                AgentType.MACRO,
+                Signal.BULLISH,
+                confidence=0.60,
+                horizon=TimeHorizon.MEDIUM,
+                completeness=0.67,
+            ),
+        ]
+        result = Supervisor().aggregate(signals)
+        hr = result.horizon_breakdown["medium"]
+        assert len(hr.contributing_agents) == 1
+        raw_conf = 0.60
+        assert hr.evidence_confidence < raw_conf, (
+            f"evidence_confidence={hr.evidence_confidence} should be < raw_confidence={raw_conf} "
+            f"when completeness=0.67 < 1.0. "
+            f"If this fails, completeness is being cancelled in the denominator (regression to commit before 25446bf)."
+        )
+
+    def test_single_source_full_completeness_equals_raw_confidence(self) -> None:
+        """對照組：compl=1.0 時 evidence_confidence == raw confidence（不受損失）。"""
+        signals = [
+            _sig(
+                AgentType.MACRO,
+                Signal.BULLISH,
+                confidence=0.60,
+                horizon=TimeHorizon.MEDIUM,
+                completeness=1.00,
+            ),
+        ]
+        result = Supervisor().aggregate(signals)
+        hr = result.horizon_breakdown["medium"]
+        assert hr.evidence_confidence == pytest.approx(0.60)
+
+    def test_single_source_evidence_confidence_equals_conf_times_completeness(self) -> None:
+        """單一來源時公式退化為 conf × compl（rel 互相抵銷，此行為為有意設計）。"""
+        conf, compl = 0.60, 0.67
+        signals = [
+            _sig(
+                AgentType.MACRO,
+                Signal.BULLISH,
+                confidence=conf,
+                horizon=TimeHorizon.MEDIUM,
+                completeness=compl,
+            ),
+        ]
+        result = Supervisor().aggregate(signals)
+        hr = result.horizon_breakdown["medium"]
+        # = Σ(conf×compl×rel) / Σ(rel) = (conf×compl×rel) / rel = conf×compl
+        assert hr.evidence_confidence == pytest.approx(conf * compl, rel=1e-6)
+
+    def test_different_completeness_same_confidence_produces_different_evconf(self) -> None:
+        """同 raw confidence、不同 completeness → evidence_confidence 必須不同。
+
+        這是 bug 的直接複現：舊公式兩者都輸出 0.60，新公式正確區分。
+        """
+        def _evconf(compl: float) -> float:
+            sigs = [
+                _sig(
+                    AgentType.MACRO,
+                    Signal.BULLISH,
+                    confidence=0.60,
+                    horizon=TimeHorizon.MEDIUM,
+                    completeness=compl,
+                )
+            ]
+            return Supervisor().aggregate(sigs).horizon_breakdown["medium"].evidence_confidence
+
+        evconf_full = _evconf(1.00)
+        evconf_partial = _evconf(0.67)
+
+        assert evconf_full != evconf_partial, (
+            "evidence_confidence must differ when completeness differs. "
+            "If equal, completeness is being cancelled (regression)."
+        )
+        assert evconf_partial < evconf_full
+
+    def test_completeness_020_extreme_discount(self) -> None:
+        """극단적인 compl=0.20：evidence_confidence = 0.70 × 0.20 = 0.14。"""
+        conf, compl = 0.70, 0.20
+        signals = [
+            _sig(
+                AgentType.TECHNICAL,
+                Signal.BULLISH,
+                confidence=conf,
+                horizon=TimeHorizon.SHORT,
+                completeness=compl,
+            ),
+        ]
+        result = Supervisor().aggregate(signals)
+        hr = result.horizon_breakdown["short"]
+        assert hr.evidence_confidence == pytest.approx(conf * compl, rel=1e-6)
+        assert hr.evidence_confidence < 0.20  # 明確低於任何合理的「可信」閾值
+
+    def test_two_sources_one_partial_lowers_evconf_vs_both_full(self) -> None:
+        """多來源：其中一個 compl<1.0 → evconf 低於兩者都 compl=1.0 的情況。"""
+        def _evconf(news_compl: float) -> float:
+            sigs = [
+                _sig(AgentType.TECHNICAL, Signal.BULLISH, confidence=0.65,
+                     horizon=TimeHorizon.SHORT, completeness=1.00),
+                _sig(AgentType.NEWS, Signal.BULLISH, confidence=0.55,
+                     horizon=TimeHorizon.SHORT, completeness=news_compl),
+            ]
+            return Supervisor().aggregate(sigs).horizon_breakdown["short"].evidence_confidence
+
+        evconf_both_full = _evconf(1.00)
+        evconf_news_partial = _evconf(0.50)
+
+        assert evconf_news_partial < evconf_both_full, (
+            "Partial completeness of one contributor must reduce overall evidence_confidence."
+        )
+
+    def test_s4_macro_medium_evidence_confidence_reflects_067_completeness(self) -> None:
+        """S4 真實情境驗證：MACRO(compl=0.67) 的 MEDIUM 層 evconf=0.402，非 0.60。
+
+        0.60 是舊公式 bug 值；0.402 = 0.60 × 0.67 是正確值。
+        """
+        signals = [
+            _sig(AgentType.RISK, Signal.NEUTRAL, 0.70, TimeHorizon.SHORT, completeness=1.00),
+            _sig(AgentType.TECHNICAL, Signal.BULLISH, 0.70, TimeHorizon.SHORT, completeness=1.00),
+            _sig(AgentType.FUNDAMENTAL, Signal.BULLISH, 0.78, TimeHorizon.LONG, completeness=1.00),
+            _sig(AgentType.NEWS, Signal.NEUTRAL, 0.10, TimeHorizon.SHORT, completeness=0.00,
+                 metrics={"llm_analysis_failed": True}),
+            _sig(AgentType.MACRO, Signal.BULLISH, 0.60, TimeHorizon.MEDIUM, completeness=0.67),
+            _sig(AgentType.CROSS_MARKET, Signal.NEUTRAL, 0.70, TimeHorizon.MEDIUM,
+                 completeness=1.00, metrics={"is_background_only": True}),
+        ]
+        result = Supervisor().aggregate(signals)
+        medium_hr = result.horizon_breakdown["medium"]
+
+        # 確認只有 MACRO 貢獻（cross_market 已排除）
+        assert len(medium_hr.contributing_agents) == 1
+        assert medium_hr.contributing_agents[0][0] == AgentType.MACRO
+
+        # 核心斷言：不是舊 bug 值 0.60，是正確值 0.402
+        assert medium_hr.evidence_confidence != pytest.approx(0.60, abs=1e-3), (
+            "evidence_confidence=0.60 is the old bug value where completeness cancelled. "
+            "Expected 0.60 × 0.67 = 0.402."
+        )
+        assert medium_hr.evidence_confidence == pytest.approx(0.60 * 0.67, rel=1e-6)
