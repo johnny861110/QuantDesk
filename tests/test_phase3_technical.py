@@ -173,11 +173,170 @@ def test_rsi_wilder_smoothing() -> None:
                        7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 2.0])
     result = compute_rsi(prices, period=14)
     expected = 375.0 / 7.0   # exact rational: ≈ 53.57142857...
-    assert result == pytest.approx(expected, rel=1e-9), (
+    assert result == pytest.approx(expected, rel=1e-9), (  # type: ignore[call-overload]
         f"Expected Wilder RSI = 375/7 ≈ {expected:.8f}, got {result:.8f}. "
         "If this fails, the implementation is using simple-average RSI instead of "
         "Wilder's EMA smoothing — they give identical results only on degenerate "
         "(all-up / all-down / flat) series."
+    )
+
+
+# ─── RSI series alignment (date ↔ RSI index mapping) ─────────────────────────
+
+def _wilder_rsi_series(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Reference Wilder RSI series with **explicit per-bar index tracking**.
+
+    rsi[k] = RSI computed from close[0 .. k] (i.e. k+1 prices, k diffs).
+    rsi[k] is nan for k < period (not enough history).
+    rsi[period] = seed (SMA of the first *period* gains/losses).
+    rsi[k+1]    = Wilder step(rsi[k], gains[k]) for k >= period.
+
+    Alignment contract
+    ------------------
+    rsi[k] incorporates the price change ENDING at close[k].
+      gains[k-1] = close[k] - close[k-1]  ← "arriving" at bar k
+    Therefore rsi[k] should be paired with (dates[k], close[k]).
+    This is the convention used in TradingView, MetaTrader, and Bloomberg.
+
+    Structural difference from compute_rsi()
+    -----------------------------------------
+    compute_rsi() is a single-pass accumulator that returns rsi[-1].
+    This function is a per-bar series builder that stores every value.
+    They must agree on every valid bar.  That agreement is the test.
+    """
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    if n < period + 1:
+        return rsi
+
+    diffs  = np.diff(close.astype(np.float64))  # len n-1; diffs[j] = close[j+1]-close[j]
+    gains  = np.maximum(diffs, 0.0)
+    losses = np.maximum(-diffs, 0.0)
+
+    def _val(g: float, loss: float) -> float:
+        if g == 0.0 and loss == 0.0:
+            return 50.0
+        if loss == 0.0:
+            return 100.0
+        return 100.0 - 100.0 / (1.0 + g / loss)
+
+    # gains[j] = change arriving at bar j+1 (= close[j+1]-close[j])
+    # Seed uses gains[0..period-1] → changes arriving at bars 1..period
+    # → seed RSI "as of" bar `period` (the (period+1)-th bar)
+    avg_g = float(gains[:period].mean())
+    avg_l = float(losses[:period].mean())
+    rsi[period] = _val(avg_g, avg_l)   # ← stored at index period
+
+    # Wilder smoothing for bars period+1 .. n-1
+    # gains[k] = change arriving at bar k+1 → RSI stored at index k+1
+    for k in range(period, n - 1):
+        avg_g = (avg_g * (period - 1) + float(gains[k])) / period
+        avg_l = (avg_l * (period - 1) + float(losses[k])) / period
+        rsi[k + 1] = _val(avg_g, avg_l)  # noqa: E741
+
+    return rsi
+
+
+def test_rsi_series_alignment_vs_scalar() -> None:
+    """
+    For every bar k ≥ period, compute_rsi(close[:k+1]) must exactly equal
+    _wilder_rsi_series(close)[k].
+
+    This proves that compute_rsi() returns the RSI for close[-1] (the
+    bar whose date/close are at index -1), with NO off-by-one shift.
+
+    The two functions differ structurally:
+    - compute_rsi()          single-pass accumulator, returns one float
+    - _wilder_rsi_series()   per-bar builder, stores every intermediate value
+
+    Correctness of their agreement is not trivially obvious; it is exactly
+    what this test is checking.
+
+    Test sequence: 40 bars of mixed-direction prices that exercise the
+    smoothing path (not a degenerate all-up / all-down case).
+    """
+    period = 14
+    rng = np.random.default_rng(42)
+    close = np.cumsum(rng.normal(0.0, 1.0, 40)) + 100.0   # random walk, seed fixed
+
+    series = _wilder_rsi_series(close, period)
+
+    mismatches: list[str] = []
+    for k in range(period, len(close)):
+        scalar = compute_rsi(close[: k + 1], period)
+        expected = series[k]
+        if abs(scalar - expected) > 1e-9:
+            mismatches.append(
+                f"  bar {k}: series={expected:.8f}  scalar={scalar:.8f}  "
+                f"diff={scalar - expected:+.2e}"
+            )
+
+    assert not mismatches, (
+        f"compute_rsi() disagrees with _wilder_rsi_series() at {len(mismatches)} bar(s):\n"
+        + "\n".join(mismatches[:10])
+        + "\n(off-by-one means RSI is paired with the WRONG bar)"
+    )
+
+
+def test_rsi_series_first_valid_bar() -> None:
+    """
+    The first non-nan RSI must be at index `period` (not period-1 or period+1).
+
+    rsi[period]   = valid (seed SMA)
+    rsi[period-1] = nan  (only period-1 diffs available, one short)
+    rsi[period+1] = valid (first Wilder step)
+    """
+    period = 14
+    close  = np.arange(1.0, 40.0)        # 39 bars; simple uptrend
+    series = _wilder_rsi_series(close, period)
+
+    assert np.isnan(series[period - 1]), (
+        f"series[{period-1}] should be nan but got {series[period-1]:.4f}"
+    )
+    assert not np.isnan(series[period]), (
+        f"series[{period}] should be first valid RSI but is nan — "
+        "off-by-one: seed is stored one bar too late"
+    )
+    assert not np.isnan(series[period + 1]), (
+        f"series[{period+1}] should be valid Wilder step but is nan"
+    )
+
+
+def test_rsi_series_printed_alignment(capsys: pytest.CaptureFixture[str]) -> None:
+    """
+    Print (bar_idx, close, rsi_series, rsi_scalar) for 20 consecutive bars
+    so a human can verify each row's values are self-consistent.
+
+    All rows with bar_idx >= period must have both rsi_series and rsi_scalar
+    equal to ≤1e-9.  The printed table is captured so pytest -s shows it.
+    """
+    period = 14
+    # 35-bar sequence with mixed direction (more interesting than pure uptrend)
+    close = np.array([
+        100.0, 102.0, 101.0, 103.0, 105.0, 104.0, 106.0, 108.0,
+        107.0, 109.0, 111.0, 110.0, 112.0, 114.0, 113.0,  # bars 0-14
+        115.0, 113.0, 116.0, 114.0, 117.0, 115.0, 118.0,  # bars 15-21
+        116.0, 119.0, 117.0, 120.0, 118.0, 121.0, 119.0,  # bars 22-28
+        122.0, 120.0, 123.0, 121.0, 124.0, 122.0,          # bars 29-34
+    ])
+
+    series = _wilder_rsi_series(close, period)
+    print(f"\n{'bar':>4s}  {'close':>7s}  {'rsi_series':>11s}  {'rsi_scalar':>11s}  {'match':>5s}")
+    print("-" * 48)
+    mismatches: list[str] = []
+    for k in range(len(close)):
+        scalar = compute_rsi(close[: k + 1], period) if k >= period else float("nan")
+        sv = series[k]
+        sv_s = f"{sv:.5f}" if not np.isnan(sv) else "  nan  "
+        sc_s = f"{scalar:.5f}" if not np.isnan(scalar) else "  nan  "
+        match = "—" if np.isnan(sv) else ("OK" if abs(sv - scalar) < 1e-9 else "MISMATCH")
+        print(f"{k:>4d}  {close[k]:>7.2f}  {sv_s:>11s}  {sc_s:>11s}  {match:>5s}")
+        if match == "MISMATCH":
+            mismatches.append(f"bar {k}: series={sv:.6f} scalar={scalar:.6f}")
+
+    assert not mismatches, (
+        "RSI series and scalar disagree:\n" + "\n".join(mismatches)
     )
 
 
