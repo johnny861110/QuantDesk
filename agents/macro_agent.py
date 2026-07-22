@@ -151,6 +151,83 @@ IMPORTANCE_WEIGHTS: dict[int, float] = {1: 0.5, 2: 1.0, 3: 2.0}
 # Surprise thresholds (expressed as fraction of |consensus|)
 # e.g. 0.05 means actual differs from consensus by ≥ 5% of |consensus|
 # ⚠️ 暫定值：5% / 20% 是主觀設定，不同指標應有個別閾值（後期可校準）
+#
+# ──────────────────────────────────────────────────────────────────────
+# TECH-DEBT TD-MACRO-01: 單一相對百分比公式對「百分比型指標」可能失準
+# ──────────────────────────────────────────────────────────────────────
+#
+# 背景
+# ----
+# compute_surprise_pct() 使用 (actual − consensus) / |consensus|，
+# 這對「絕對數值型指標」（例如 NFP 以千人為單位、初領失業金以千人計）
+# 是合理的比較基準——不同規模的指標可以用同一把尺衡量相對偏差。
+#
+# 問題
+# ----
+# 25 個指標中有兩類本質上不同的指標混用同一公式：
+#
+# A. 絕對數值型（適合相對 %，現行公式 OK）
+#    Non Farm Payrolls       — 單位：千人，consensus 典型值 100–300K
+#    ADP Employment Change   — 單位：千人
+#    Initial Jobless Claims  — 單位：千人，consensus 典型值 200–250K
+#    Balance Of Trade        — 單位：十億美元
+#    Current Account         — 單位：十億美元
+#    → 不同事件規模差異大，相對 % 是有意義的跨指標比較尺
+#
+# B. 百分比型（current formula 產生失真，應改用絕對 pp 差距）
+#    CPI / Core CPI / Inflation Rate / PCE / PPI   — 本身已是 %
+#    GDP Growth Rate / GDP                          — 本身已是 %
+#    Unemployment Rate                              — 本身已是 %
+#    Interest Rate / Fed Funds Rate                 — 本身已是 %
+#    Industrial Production / Retail Sales           — MoM %
+#    → 在低利率 / 低通膨環境，絕對差距（pp）是市場實際關注的量度；
+#      用相對 % 會讓低基期指標的同等 pp 偏差被放大：
+#
+#      例：CPI 共識 2.0%，實際 2.1%（0.1pp surprise）
+#          surprise_pct = 0.1 / 2.0 = 5%  → classify "beat"
+#          CPI 共識 0.3%（通縮期），實際 0.4%（同樣 0.1pp surprise）
+#          surprise_pct = 0.1 / 0.3 = 33% → classify "large_beat"  ← 失真
+#      Fed 看待兩者的實際衝擊幾乎相同（都是 0.1pp 偏差），
+#      但現行公式給出截然不同的分類。
+#
+# C. 指數型（無單位，但值域固定在特定區間）
+#    PMI 系列（Manufacturing / Services / Composite / ISM）— 值域約 40–65
+#    Consumer Confidence                                    — 值域依機構不同
+#    → PMI 的 consensus 常在 50 附近，|consensus|≈50，
+#      相對 % ≈ absolute pp / 50，threshold 偏嚴（5% 相對 ≈ 2.5pp 絕對），
+#      尚在可接受範圍，但仍非最準確的衡量方式。
+#
+# 短期影響評估
+# -----------
+# 在典型市場環境（通膨 2-4%、失業率 3-5%）下：
+#   - 0.1pp CPI 偏差 → surprise_pct ≈ 2–5%，接近 in_line/beat 邊界，影響有限
+#   - NFP 偏差以百萬計但 consensus 以十萬計 → 相對 % 正常
+# 低利率 / 接近零通膨環境下失真最嚴重；台灣 CPI 若共識 0.5%，
+# 0.1pp 偏差即觸發 20% relative → 錯誤分類為 "large_beat"。
+#
+# 正確修法（留給後期校準）
+# -------------------------
+# 方案 A：為百分比型指標定義絕對 pp 閾值，分兩條路徑：
+#   if category in PCT_TYPE_CATEGORIES:
+#       metric = compute_surprise(actual, consensus)  # pp 絕對差
+#       label = _classify_by_pp(metric, category)     # 個別指標 pp threshold
+#   else:
+#       metric = compute_surprise_pct(actual, consensus)
+#       label = classify_surprise(metric)
+#
+# 方案 B：Z-score 標準化（需要歷史分布資料，Phase 6 考慮）
+#   surprise_z = (actual - consensus) / historical_std(category)
+#
+# 目前決定
+# --------
+# 維持單一相對 % 公式，但調低嚴重程度預期：
+# - 絕對數值型指標：結果可靠
+# - 百分比型指標：在正常通膨環境（2-4%）誤差可接受；
+#   極低基期環境可能高估偏差；Phase 5 Supervisor 應謹慎對待
+#   通膨 < 1% 時的 large_beat / large_miss 分類
+# - Phase 6 應引入 PCT_TYPE_CATEGORIES 集合，為百分比型指標
+#   切換到 pp-based threshold（individual_pp_threshold per category）
+# ──────────────────────────────────────────────────────────────────────
 _LARGE_SURPRISE_PCT: float = 0.20   # |surprise_pct| ≥ 20% → large
 _SMALL_SURPRISE_PCT: float = 0.05   # |surprise_pct| < 5%  → in_line
 
@@ -190,8 +267,20 @@ def compute_surprise_pct(actual: float, consensus: float) -> float:
     Relative surprise: (actual − consensus) / |consensus|.
 
     Returns nan if consensus is zero (avoid division by zero).
-    Preferred metric for comparing surprises across different-scale indicators
-    (e.g. CPI % vs NFP thousands).
+
+    Appropriate for: absolute-value indicators (NFP in thousands, Claims,
+    Trade Balance) where consensus scale varies widely and relative deviation
+    is a meaningful cross-indicator comparison.
+
+    Known limitation (TD-MACRO-01): For indicators already expressed as
+    percentages (CPI, GDP, Unemployment Rate, Interest Rate), dividing by
+    the consensus value inflates the surprise in low-base-rate environments.
+    A 0.1pp CPI miss when consensus=0.3% becomes surprise_pct=33%, which
+    the classifier treats as "large_miss" — the same absolute deviation at
+    consensus=3.0% would be 3.3% ("in_line").  In normal inflation regimes
+    (2–4%) the distortion is mild; near-zero regimes are unreliable.
+    See TD-MACRO-01 comment near _LARGE_SURPRISE_PCT for the full analysis
+    and proposed fix.
     """
     if consensus == 0.0:
         return float("nan")
