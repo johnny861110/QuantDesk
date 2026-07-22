@@ -97,8 +97,15 @@ def _compute_horizon_result(
     Returns
     -------
     (HorizonResult, excluded_agents, exclusion_reasons, participating_agents)
+
+    HorizonResult 包含兩個獨立信心概念（見 signal.py HorizonResult docstring）：
+      consensus_share    — 贏方向的加權份額（方向一致度）
+      evidence_confidence — 底層 raw confidence 的加權平均（底層信心）
     """
     contributors: list[tuple[AgentType, Signal, float]] = []
+    # 用於計算 evidence_confidence：(raw_confidence, base_weight)
+    # base_weight = completeness × SOURCE_RELIABILITY（不含 confidence 因子）
+    conf_base: list[tuple[float, float]] = []
     excluded: list[AgentType] = []
     exc_reasons: dict[AgentType, str] = {}
     participating: list[AgentType] = []
@@ -109,8 +116,11 @@ def _compute_horizon_result(
             excluded.append(sig.agent)
             exc_reasons[sig.agent] = reason
             continue
-        weight = _effective_weight(sig)
-        contributors.append((sig.agent, sig.signal, weight))
+        rel = SOURCE_RELIABILITY.get(sig.agent, 0.0)
+        base_weight = sig.data_quality.completeness * rel
+        eff_weight = sig.confidence * base_weight
+        contributors.append((sig.agent, sig.signal, eff_weight))
+        conf_base.append((sig.confidence, base_weight))
         participating.append(sig.agent)
 
     if not contributors:
@@ -118,7 +128,8 @@ def _compute_horizon_result(
         return (
             HorizonResult(
                 direction=Signal.NEUTRAL,
-                weighted_confidence=0.0,
+                consensus_share=0.0,
+                evidence_confidence=0.0,
                 contributing_agents=[],
                 excluded_agents=excluded,
             ),
@@ -127,29 +138,44 @@ def _compute_horizon_result(
             participating,
         )
 
-    # 按方向累加有效權重
+    # ── consensus_share：贏方向有效權重 ÷ 總有效權重 ─────────────────────
     direction_weights: dict[Signal, float] = {s: 0.0 for s in Signal}
-    total_weight = 0.0
+    total_eff_weight = 0.0
     for _, sig_val, w in contributors:
         direction_weights[sig_val] += w
-        total_weight += w
+        total_eff_weight += w
 
-    if total_weight == 0.0:
-        # 所有 agent 有效權重均為 0（例如 completeness=0 但 completeness>0 — 不應發生）
+    if total_eff_weight == 0.0:
         return (
-            HorizonResult(Signal.NEUTRAL, 0.0, contributors, excluded),
+            HorizonResult(
+                direction=Signal.NEUTRAL,
+                consensus_share=0.0,
+                evidence_confidence=0.0,
+                contributing_agents=contributors,
+                excluded_agents=excluded,
+            ),
             excluded,
             exc_reasons,
             participating,
         )
 
     winning_signal = max(direction_weights, key=lambda s: direction_weights[s])
-    winning_conf = direction_weights[winning_signal] / total_weight
+    consensus_share = direction_weights[winning_signal] / total_eff_weight
+
+    # ── evidence_confidence：raw confidence 以 base_weight 為權加權平均 ──
+    # = Σ(confidence_i × base_weight_i) / Σ(base_weight_i)
+    # 不把 confidence 自身再乘進來，避免高信心 agent 的基數過度自我放大。
+    total_base_weight = sum(bw for _, bw in conf_base)
+    if total_base_weight > 0.0:
+        evidence_confidence = sum(c * bw for c, bw in conf_base) / total_base_weight
+    else:
+        evidence_confidence = 0.0
 
     return (
         HorizonResult(
             direction=winning_signal,
-            weighted_confidence=winning_conf,
+            consensus_share=consensus_share,
+            evidence_confidence=evidence_confidence,
             contributing_agents=contributors,
             excluded_agents=excluded,
         ),
@@ -187,10 +213,18 @@ def _build_narrative(output: SupervisorOutput) -> str:
         if not hr.contributing_agents:
             parts.append(f"【{h}】無方向性訊號（投票池為空）")
         else:
-            agents = ", ".join(a.value for a, _, _ in hr.contributing_agents)
+            agree_pct = f"{hr.consensus_share:.0%}"
+            ev_conf = f"{hr.evidence_confidence:.2f}"
+            n = len(hr.contributing_agents)
+            if n == 1:
+                sole = hr.contributing_agents[0][0].value
+                src_note = f"僅單一來源：{sole}"
+            else:
+                names = ", ".join(a.value for a, _, _ in hr.contributing_agents)
+                src_note = f"來源：{names}"
             parts.append(
                 f"【{h}】{hr.direction.value}"
-                f"（加權信心 {hr.weighted_confidence:.2f}，貢獻 agent：{agents}）"
+                f"（方向一致度 {agree_pct}，底層信心 {ev_conf}，{src_note}）"
             )
 
     if output.background_context:
@@ -203,8 +237,8 @@ def _build_narrative(output: SupervisorOutput) -> str:
         )
 
     if output.excluded_from_voting:
-        names = [a.value for a in output.excluded_from_voting]
-        parts.append(f"【排除投票】{names}")
+        exc_names = [a.value for a in output.excluded_from_voting]
+        parts.append(f"【排除投票】{exc_names}")
 
     return "  ".join(parts) if parts else "Supervisor 彙總完成，無顯著方向性訊號。"
 
@@ -275,7 +309,10 @@ class Supervisor:
                 candidate: HorizonResult | None = horizon_breakdown.get(h)
                 if candidate is not None and candidate.contributing_agents:
                     overall_signal = candidate.direction
-                    final_confidence = candidate.weighted_confidence
+                    # 用 evidence_confidence（底層信心），不用 consensus_share（方向一致度）
+                    # 原因：consensus_share=1.0 只代表「無對立票」，不代表分析品質高；
+                    # evidence_confidence 才反映底層來源的實際 raw confidence。
+                    final_confidence = candidate.evidence_confidence
                     break
 
         output = SupervisorOutput(

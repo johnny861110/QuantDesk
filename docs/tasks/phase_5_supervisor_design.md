@@ -499,7 +499,8 @@ assert supervisor_output.short_horizon_direction == Signal.BULLISH
 @dataclass
 class HorizonResult:
     direction: Signal
-    weighted_confidence: float
+    consensus_share: float      # 方向一致度（贏方向加權份額；≠ 信心）
+    evidence_confidence: float  # 底層信心（raw confidence 加權平均）
     contributing_agents: list[tuple[AgentType, Signal, float]]  # (agent, signal, weight)
     excluded_agents: list[AgentType]   # 排除原因見 exclusion_reasons
 

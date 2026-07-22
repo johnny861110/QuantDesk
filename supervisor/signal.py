@@ -19,10 +19,26 @@ from schemas.agent_signal import AgentSignal, AgentType, HardConstraint, Signal,
 
 @dataclass
 class HorizonResult:
-    """單一時間框架內的加權仲裁結果。"""
+    """單一時間框架內的加權仲裁結果。
+
+    兩個獨立概念，不可混用：
+
+    consensus_share（方向一致度）
+        「贏方向拿走的加權份額」÷ 全部有效權重。
+        例：SHORT 層只有一個 agent 投票 → share=1.0（方向沒有對立聲音），
+        但這**不代表該 agent 的分析可信度是 100%**。
+        範圍 [0, 1]；越高代表層內方向越一致，越低代表層內分歧越大。
+
+    evidence_confidence（底層信心）
+        各貢獻 agent 的 raw confidence 以 (completeness × SOURCE_RELIABILITY)
+        為權重的加權平均，反映該層底層證據本身的可信程度。
+        例：LONG 層只有 FUNDAMENTAL(conf=0.75) → evidence_confidence=0.75。
+        範圍 [0, 1]；這是「這層的訊號有多可信」的真實估算。
+    """
     direction: Signal
-    weighted_confidence: float
-    contributing_agents: list[tuple[AgentType, Signal, float]]  # (agent, signal, weight)
+    consensus_share: float          # 方向一致度（前身：weighted_confidence）
+    evidence_confidence: float      # 底層信心（加權平均 raw confidence）
+    contributing_agents: list[tuple[AgentType, Signal, float]]  # (agent, signal, eff_weight)
     excluded_agents: list[AgentType]
 
 
