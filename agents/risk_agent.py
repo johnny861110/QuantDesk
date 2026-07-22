@@ -412,21 +412,50 @@ def build_risk_signal(
         ),
     ]
 
+    # ── IV missing count ──────────────────────────────────────────────────────
+    iv_missing_count = n_options - n_priced
+    metrics["iv_missing_count"] = iv_missing_count
+
     # ── Signal and confidence ─────────────────────────────────────────────────
     signal     = _determine_signal(net_delta_pct_nav)
     confidence = _compute_confidence(agg_result, positions, greeks_map)
 
-    narrative = _build_narrative(metrics, agg_result.hard_constraints)
+    # ── Hard constraint annotation for partial IV missing ─────────────────────
+    # Follow FX-exclusion pattern from aggregation.py: append note to detail.
+    if iv_missing_count > 0:
+        iv_note = (
+            f"  ⚠ IV缺失：{iv_missing_count}/{n_options}個選擇權未定價，"
+            "Greeks可能低估"
+        )
+        annotated_constraints = [
+            HardConstraint(
+                type=hc.type,
+                current=hc.current,
+                limit=hc.limit,
+                breached=hc.breached,
+                detail=(hc.detail or "") + iv_note,
+            )
+            for hc in agg_result.hard_constraints
+        ]
+    else:
+        annotated_constraints = list(agg_result.hard_constraints)
+
+    narrative = _build_narrative(metrics, annotated_constraints)
     verifier_errors = check_narrative(narrative, metrics)
     if verifier_errors:
         all_errors.extend(verifier_errors)
 
-    # IV completely absent → degrade and warn conservatively
+    # IV failure error messages
     if n_options > 0 and n_priced == 0:
         all_errors.append(
             "所有選擇權 Greeks 計算失敗（IV/spot 缺失）。"
             "無法評估凸性風險（gamma/vega）。"
             "保守處置：confidence 已降低；請確認 spot_map 與到期日。"
+        )
+    elif iv_missing_count > 0:
+        all_errors.append(
+            f"部分選擇權 Greeks 計算失敗（{iv_missing_count}/{n_options}）。"
+            "凸性風險（gamma/vega）可能低估；請確認 spot_map 與到期日。"
         )
 
     return AgentSignal(
@@ -436,7 +465,7 @@ def build_risk_signal(
         confidence      = confidence,
         time_horizon    = TimeHorizon.SHORT,
         key_evidence    = key_evidence,
-        hard_constraints = agg_result.hard_constraints,
+        hard_constraints = annotated_constraints,
         metrics         = metrics,
         narrative       = narrative,
         data_quality    = DataQuality(
@@ -477,9 +506,12 @@ def _compute_confidence(
     """
     Start at 1.0; reduce for data gaps.
 
-    −0.20 : FX missing → USD exposure excluded from consolidated_twd
-    −0.10 : any invalid position (bad schema / expired option)
-    −0.30 : all option Greeks missing (IV completely unavailable)
+    −0.20                   : FX missing → USD exposure excluded from consolidated_twd
+    −0.10                   : any invalid position (bad schema / expired option)
+    −0.30 × missing_fraction: proportional IV penalty
+                              complete failure (0 priced):   −0.30
+                              partial failure (k/n priced):  −0.30 × (1 − k/n)
+                              all priced:                     0
     Minimum: 0.10
     """
     conf = 1.0
@@ -492,12 +524,17 @@ def _compute_confidence(
 
     option_valid = [p for p in positions if p.is_option and p.is_valid]
     if option_valid:
-        n_priced = sum(
+        n_options_conf = len(option_valid)
+        n_priced_conf = sum(
             1 for idx, p in enumerate(positions)
             if p.is_option and p.is_valid and idx in greeks_map
         )
-        if n_priced == 0:
-            conf -= 0.30   # no convexity data at all
+        # Proportional deduction: missing_fraction × 0.30
+        # Complete failure (n_priced=0):  −0.30 (same as before)
+        # Partial  (e.g. 1/3 priced):    −0.30 × 2/3 ≈ −0.20
+        # All priced:                      0 (no penalty)
+        missing_fraction = 1.0 - n_priced_conf / n_options_conf
+        conf -= 0.30 * missing_fraction
 
     return max(0.10, conf)
 

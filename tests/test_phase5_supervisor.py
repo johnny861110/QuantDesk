@@ -665,6 +665,19 @@ class TestSupervisorOutputStructure:
         # LONG(BULLISH) should win over SHORT(BEARISH) in overall_recommendation
         assert result.overall_recommendation == Signal.BULLISH
 
+    def test_disclaimer_is_nonempty(self) -> None:
+        """Phase 6 P0-1: disclaimer 欄位必須存在且非空。"""
+        result = Supervisor().aggregate([_sig(AgentType.TECHNICAL, Signal.BULLISH)])
+        assert hasattr(result, "disclaimer")
+        assert isinstance(result.disclaimer, str)
+        assert len(result.disclaimer) > 0
+
+    def test_disclaimer_contains_key_phrase(self) -> None:
+        """disclaimer 必須包含「研究輔助」與「自行判斷」，確認免責聲明內容正確。"""
+        result = Supervisor().aggregate([_sig(AgentType.TECHNICAL, Signal.BULLISH)])
+        assert "研究輔助" in result.disclaimer
+        assert "自行判斷" in result.disclaimer
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 迴歸測試：evidence_confidence 公式 — completeness 不可在分母消除

@@ -336,6 +336,11 @@ class Supervisor:
             confidence=final_confidence,
             overall_narrative="",          # filled below
             raw_agent_signals=signals,
+            disclaimer=(
+                "本系統輸出為研究輔助與風險提示，"
+                "非自動下單或保證獲利建議，"
+                "實際投資決策需自行判斷並承擔風險"
+            ),
         )
         output.overall_narrative = _build_narrative(output)
         return output

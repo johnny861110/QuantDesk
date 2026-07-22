@@ -730,3 +730,146 @@ class TestRunRiskAgent:
         syms = signal.metrics["covered_symbols"]
         assert isinstance(syms, list)
         assert len(syms) > 0  # positions.yaml has at least one valid position
+
+
+# ─── Phase 6 P0-2: IV missing fail-safe ──────────────────────────────────────
+
+class TestIVMissingFailSafe:
+    """
+    Phase 6 P0-2: 部分 IV 缺失的 fail-safe 行為。
+
+    Setup: 1 個期貨（TXFF）+ 2 個選擇權（TXO），只有第 1 個選擇權有 greeks_map
+    → n_options=2, n_priced=1, missing_fraction=0.5
+    → confidence deduction = 0.30 × 0.5 = 0.15
+    → confidence = 1.0 − 0.15 = 0.85
+    """
+
+    @pytest.fixture
+    def _partial_iv_positions(self) -> list[Position]:
+        """1 futures + 2 options."""
+        return [
+            Position(
+                symbol="TXFF", instrument_type="futures",
+                quantity=-2, currency="TWD", multiplier=200.0,
+            ),
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=-5, currency="TWD", multiplier=50.0,
+                strike=22500.0, expiry="2026-09-16",
+                option_type="call", style="european",
+            ),
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=3, currency="TWD", multiplier=50.0,
+                strike=22000.0, expiry="2026-09-16",
+                option_type="put", style="european",
+            ),
+        ]
+
+    @pytest.fixture
+    def _partial_greeks_map(self) -> dict[int, GreeksResult]:
+        """Only position index 1 (first TXO) is priced."""
+        from agents.risk.pricing_router import GreeksResult
+        return {
+            1: GreeksResult(
+                price=150.0, delta=-0.35, gamma=0.0001,
+                vega=3.0, theta=-5.0, rho=-0.01,
+                model="black_scholes", iv=0.20,
+            )
+        }
+
+    def test_partial_iv_failure_reduces_confidence_proportionally(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """1/2 options priced → missing_fraction=0.5 → conf = 1.0 − 0.15 = 0.85."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        # missing_fraction = (2 - 1) / 2 = 0.5 → penalty = 0.30 × 0.5 = 0.15
+        assert signal.confidence == pytest.approx(1.0 - 0.30 * 0.5, rel=1e-6)
+
+    def test_partial_iv_failure_annotates_hard_constraints(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """Every hard constraint detail should carry the IV-missing warning."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        for hc in signal.hard_constraints:
+            assert hc.detail is not None
+            assert "IV缺失" in hc.detail, (
+                f"Expected IV-missing note in constraint {hc.type!r} detail: {hc.detail!r}"
+            )
+            assert "1/2" in hc.detail, (
+                f"Expected '1/2' count in constraint {hc.type!r} detail: {hc.detail!r}"
+            )
+
+    def test_iv_missing_count_in_metrics(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """metrics['iv_missing_count'] must equal n_options − n_priced."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        assert "iv_missing_count" in signal.metrics
+        assert signal.metrics["iv_missing_count"] == 1  # 2 options, 1 priced
+
+    def test_all_iv_priced_no_annotation(
+        self,
+        _partial_iv_positions: list[Position],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """When all options are priced, no IV-missing annotation and no penalty."""
+        from agents.risk.pricing_router import GreeksResult
+        full_greeks = {
+            1: GreeksResult(
+                price=150.0, delta=-0.35, gamma=0.0001,
+                vega=3.0, theta=-5.0, rho=-0.01,
+                model="black_scholes", iv=0.20,
+            ),
+            2: GreeksResult(
+                price=80.0, delta=0.25, gamma=0.0001,
+                vega=2.5, theta=-4.0, rho=0.01,
+                model="black_scholes", iv=0.20,
+            ),
+        }
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=full_greeks,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        assert signal.metrics["iv_missing_count"] == 0
+        assert signal.confidence == pytest.approx(1.0)
+        for hc in signal.hard_constraints:
+            assert "IV缺失" not in (hc.detail or "")

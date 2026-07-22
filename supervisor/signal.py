@@ -79,6 +79,7 @@ class SupervisorOutput:
     confidence: float
     overall_narrative: str
     raw_agent_signals: list[AgentSignal]
+    disclaimer: str
 
     # ── Backward-compat properties for test_phase0 ──────────────────────────
 
