@@ -26,9 +26,14 @@ Full pipeline (run_macro_agent):
 
 Real-world validation case (in-code commentary):
   US CPI Sep 2024: actual=2.4%, consensus=2.3%
-  surprise_pct = (2.4 - 2.3) / |2.3| ≈ +4.35%
-  classify_surprise("beat") [5% > 4.35% ≥ 5% → borderline; tested separately]
-  event_market_direction("Inflation Rate", +1) = -1 (inflation beat = bearish)
+  pp_diff = 0.1pp → classify_surprise_pp → "beat" (≥ 0.10pp threshold)
+  [raw classify_surprise(0.0435) = "in_line" — shows the fix matters]
+  event_market_direction("CPI", +1) = -1 (inflation beat = bearish)
+
+TD-MACRO-01 partial fix:
+  PP_THRESHOLD_CATEGORIES (CPI, Core CPI, PCE, Core PCE, Inflation Rate,
+  Core Inflation Rate) now routed through classify_surprise_pp() with
+  absolute pp thresholds (0.10pp small / 0.30pp large).
 """
 from __future__ import annotations
 
@@ -52,12 +57,14 @@ from agents.macro_agent import (
     CATEGORY_DIRECTION,
     GROWTH_CATEGORIES,
     INFLATION_CATEGORIES,
+    PP_THRESHOLD_CATEGORIES,
     Signal,
     _build_narrative,
     _detect_hot_data_warning,
     _recency_weight,
     _score_to_signal,
     classify_surprise,
+    classify_surprise_pp,
     compute_macro_score,
     compute_surprise,
     compute_surprise_pct,
@@ -908,6 +915,199 @@ class TestCategorySetIntegrity:
     def test_inflation_categories_all_negative(self) -> None:
         for cat in INFLATION_CATEGORIES:
             assert CATEGORY_DIRECTION[cat] == -1, f"{cat} should have direction -1"
+
+
+# ─── TD-MACRO-01: classify_surprise_pp ───────────────────────────────────────
+
+
+class TestClassifySurprisePp:
+    """Tests for the pp-based classifier used by PP_THRESHOLD_CATEGORIES."""
+
+    def test_large_beat(self) -> None:
+        assert classify_surprise_pp(0.35) == "large_beat"
+
+    def test_beat_exactly_at_small_threshold(self) -> None:
+        assert classify_surprise_pp(0.10) == "beat"
+
+    def test_beat_between_thresholds(self) -> None:
+        assert classify_surprise_pp(0.20) == "beat"
+
+    def test_in_line_positive(self) -> None:
+        assert classify_surprise_pp(0.05) == "in_line"
+
+    def test_in_line_zero(self) -> None:
+        assert classify_surprise_pp(0.0) == "in_line"
+
+    def test_miss_between_thresholds(self) -> None:
+        assert classify_surprise_pp(-0.20) == "miss"
+
+    def test_large_miss(self) -> None:
+        assert classify_surprise_pp(-0.35) == "large_miss"
+
+    def test_nan_returns_in_line(self) -> None:
+        assert classify_surprise_pp(float("nan")) == "in_line"
+
+    def test_exactly_at_large_threshold(self) -> None:
+        assert classify_surprise_pp(0.30) == "large_beat"
+
+    def test_cpi_sep2024_is_beat_not_in_line(self) -> None:
+        """
+        Core fix demonstration: US CPI Sep 2024 (actual=2.4%, consensus=2.3%).
+
+        Old relative % formula: surprise_pct = 0.1/2.3 ≈ 4.35% → "in_line"
+          (wrong: Fed and market DID react to this 0.1pp beat)
+        New pp formula: pp_diff = 0.1pp → "beat"
+          (correct: 0.1pp is the minimum market-moving increment for CPI)
+
+        Same 0.1pp surprise at low base (consensus=0.3%):
+          Old: 0.1/0.3 = 33% → "large_beat"  (wrong: same economic impact)
+          New: 0.1pp → "beat"                 (correct: consistent across base rates)
+        """
+        pp_diff = compute_surprise(2.4, 2.3)  # = 0.1
+        assert classify_surprise_pp(pp_diff) == "beat"
+
+        # Contrast: old formula gives "in_line" for the same numbers
+        spct = compute_surprise_pct(2.4, 2.3)  # ≈ 4.35%
+        assert classify_surprise(spct) == "in_line"
+
+    def test_cpi_low_base_consistent_across_regimes(self) -> None:
+        """
+        With low base (consensus=0.3%), same 0.1pp absolute surprise
+        should still be "beat", not "large_beat" (old formula gave large_beat).
+        """
+        pp_diff = compute_surprise(0.4, 0.3)  # = 0.1pp — same economic magnitude
+        assert classify_surprise_pp(pp_diff) == "beat"
+
+        # Old formula inflated this to 33% → "large_beat" (wrong)
+        spct = compute_surprise_pct(0.4, 0.3)
+        assert classify_surprise(spct) == "large_beat"   # confirms the old bug
+
+    def test_cpi_large_miss(self) -> None:
+        """CPI actual=1.9% vs consensus=2.3% = -0.4pp → large_miss."""
+        pp_diff = compute_surprise(1.9, 2.3)  # = -0.4
+        assert classify_surprise_pp(pp_diff) == "large_miss"
+
+
+# ─── TD-MACRO-01: PP_THRESHOLD_CATEGORIES routing in pipeline ─────────────────
+
+
+class TestPPThresholdRouting:
+    """Verify that compute_macro_score routes PP_THRESHOLD_CATEGORIES correctly."""
+
+    def test_cpi_uses_pp_path(self) -> None:
+        """CPI event: details[0][2] should be pp_diff (0.1), not relative pct (0.0435)."""
+        event = MacroEvent(
+            category="CPI", country="United States",
+            actual=2.4, consensus=2.3, previous=2.5,
+            unit="%", importance=3,
+            release_date=datetime.now(UTC),
+            source_name="trading_economics",
+        )
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        assert len(details) == 1
+        _evt, _dir, surprise_metric, _w, label = details[0]
+        # pp_diff = 0.1, NOT relative pct ≈ 0.0435
+        assert surprise_metric == pytest.approx(0.1, abs=1e-9)
+        assert label == "beat"  # 0.1pp ≥ 0.10pp threshold
+
+    def test_inflation_rate_uses_pp_path(self) -> None:
+        """Inflation Rate is in PP_THRESHOLD_CATEGORIES."""
+        # actual=4.0, consensus=3.0 → pp=1.0 → large_beat (well above 0.30 threshold)
+        event = _make_event("Inflation Rate", actual=4.0, consensus=3.0)
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        assert len(details) == 1
+        _, _, surprise_metric, _, label = details[0]
+        assert surprise_metric == pytest.approx(1.0, abs=1e-9)  # pp
+        assert label == "large_beat"
+
+    def test_pce_uses_pp_path(self) -> None:
+        """PCE Price Index is in PP_THRESHOLD_CATEGORIES."""
+        event = _make_event("PCE Price Index", actual=2.5, consensus=2.4)
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        assert len(details) == 1
+        _, _, surprise_metric, _, label = details[0]
+        assert surprise_metric == pytest.approx(0.1, abs=1e-9)
+        assert label == "beat"
+
+    def test_core_cpi_uses_pp_path(self) -> None:
+        """Core CPI is in PP_THRESHOLD_CATEGORIES."""
+        event = _make_event("Core CPI", actual=3.3, consensus=3.4)
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        assert len(details) == 1
+        _, _, surprise_metric, _, label = details[0]
+        assert surprise_metric == pytest.approx(-0.1, abs=1e-9)
+        assert label == "miss"  # -0.1pp at exactly -0.10 threshold
+
+    def test_gdp_uses_relative_pct_path(self) -> None:
+        """GDP Growth Rate is NOT in PP_THRESHOLD_CATEGORIES → relative % path."""
+        event = _make_event("GDP Growth Rate", actual=3.0, consensus=2.0)
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        assert len(details) == 1
+        _, _, surprise_metric, _, label = details[0]
+        # relative pct = (3.0 - 2.0) / 2.0 = 0.5 (50%)
+        assert surprise_metric == pytest.approx(0.5, abs=1e-6)
+        assert label == "large_beat"
+
+    def test_nfp_uses_relative_pct_path(self) -> None:
+        """NFP is absolute-value type → relative % path."""
+        event = _make_event("Non Farm Payrolls", actual=336.0, consensus=170.0)
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        assert len(details) == 1
+        _, _, surprise_metric, _, label = details[0]
+        assert surprise_metric == pytest.approx((336 - 170) / 170, rel=0.01)
+        assert label == "large_beat"
+
+    def test_pp_threshold_categories_all_in_direction_table(self) -> None:
+        """All PP_THRESHOLD_CATEGORIES must have CATEGORY_DIRECTION entry."""
+        for cat in PP_THRESHOLD_CATEGORIES:
+            assert cat in CATEGORY_DIRECTION, f"{cat} missing from CATEGORY_DIRECTION"
+
+    def test_pp_threshold_categories_all_negative_direction(self) -> None:
+        """All PP_THRESHOLD_CATEGORIES are inflation-type: direction should be -1."""
+        for cat in PP_THRESHOLD_CATEGORIES:
+            assert CATEGORY_DIRECTION[cat] == -1, f"{cat} should have direction -1"
+
+    def test_label_in_details_matches_expected_pp_classifier(self) -> None:
+        """
+        Confirm label stored in details tuple is from classify_surprise_pp,
+        not classify_surprise, for PP_THRESHOLD_CATEGORIES.
+        """
+        # CPI: 2.4 vs 2.3 → pp=0.1 → "beat" via pp classifier
+        # but relative %: 4.35% → "in_line" via pct classifier
+        event = MacroEvent(
+            category="CPI", country="United States",
+            actual=2.4, consensus=2.3, previous=2.5,
+            unit="%", importance=3,
+            release_date=datetime.now(UTC),
+            source_name="trading_economics",
+        )
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        _, _, _, _, label = details[0]
+        assert label == "beat"   # pp classifier result
+        assert label != "in_line"  # confirms NOT using old pct classifier
+
+    def test_pipeline_cpi_event_summaries_have_pp_type(self) -> None:
+        """The event_summaries metrics should show surprise_metric_type='pp' for CPI."""
+        event = MacroEvent(
+            category="CPI", country="United States",
+            actual=2.4, consensus=2.3, previous=2.5,
+            unit="%", importance=3,
+            release_date=datetime.now(UTC),
+            source_name="trading_economics",
+        )
+        sig = run_macro_agent(macro_adapter=_make_mock_adapter([event]))
+        summaries = sig.metrics.get("event_summaries", [])
+        assert len(summaries) == 1
+        assert summaries[0]["surprise_metric_type"] == "pp"
+        assert summaries[0]["surprise_metric"] == pytest.approx(0.1, abs=1e-9)
+
+    def test_pipeline_gdp_event_summaries_have_pct_type(self) -> None:
+        """GDP should have surprise_metric_type='pct' in event_summaries."""
+        event = _make_event("GDP Growth Rate", actual=3.0, consensus=2.0)
+        sig = run_macro_agent(macro_adapter=_make_mock_adapter([event]))
+        summaries = sig.metrics.get("event_summaries", [])
+        assert len(summaries) == 1
+        assert summaries[0]["surprise_metric_type"] == "pct"
 
 
 # ─── Import from macro_agent private constant ─────────────────────────────────

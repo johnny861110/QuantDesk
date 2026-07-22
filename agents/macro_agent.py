@@ -205,31 +205,55 @@ IMPORTANCE_WEIGHTS: dict[int, float] = {1: 0.5, 2: 1.0, 3: 2.0}
 # 低利率 / 接近零通膨環境下失真最嚴重；台灣 CPI 若共識 0.5%，
 # 0.1pp 偏差即觸發 20% relative → 錯誤分類為 "large_beat"。
 #
-# 正確修法（留給後期校準）
-# -------------------------
-# 方案 A：為百分比型指標定義絕對 pp 閾值，分兩條路徑：
-#   if category in PCT_TYPE_CATEGORIES:
-#       metric = compute_surprise(actual, consensus)  # pp 絕對差
-#       label = _classify_by_pp(metric, category)     # 個別指標 pp threshold
-#   else:
-#       metric = compute_surprise_pct(actual, consensus)
-#       label = classify_surprise(metric)
+# 部分修法（Phase 5 開始前完成，不延至 Phase 6）
+# ------------------------------------------------
+# 理由：Phase 5 Supervisor 立即消費 macro signal 做信心加權仲裁；
+# 若 CPI/PCE 這類高頻觸發指標的 surprise 分類系統性失真，
+# 從 Phase 5 第一天起就汙染仲裁輸入，事後難以分辨是 Supervisor
+# 邏輯錯還是輸入訊號本身有問題。
 #
-# 方案 B：Z-score 標準化（需要歷史分布資料，Phase 6 考慮）
-#   surprise_z = (actual - consensus) / historical_std(category)
+# Phase 5 前已修：PP_THRESHOLD_CATEGORIES 集合（見下方）
+#   CPI / Core CPI / PCE Price Index / Core PCE Price Index /
+#   Inflation Rate / Core Inflation Rate
+#   → 切換至 compute_surprise(actual, consensus)（絕對 pp 差）
+#   → classify_surprise_pp(pp_diff)（pp-based 閾值）
+#   → sur_w = min(|pp_diff|, 0.5)
 #
-# 目前決定
-# --------
-# 維持單一相對 % 公式，但調低嚴重程度預期：
-# - 絕對數值型指標：結果可靠
-# - 百分比型指標：在正常通膨環境（2-4%）誤差可接受；
-#   極低基期環境可能高估偏差；Phase 5 Supervisor 應謹慎對待
-#   通膨 < 1% 時的 large_beat / large_miss 分類
-# - Phase 6 應引入 PCT_TYPE_CATEGORIES 集合，為百分比型指標
-#   切換到 pp-based threshold（individual_pp_threshold per category）
+# 選擇這 6 個指標的理由：
+#   (1) Phase 5 仲裁最高頻觸發
+#   (2) 台灣 CPI 常在 1-2% 低位 → 相對 % 失真是非罕見 edge case
+#   (3) 0.1pp CPI surprise 在任何通膨基期都有相同 Fed 影響力，
+#       但相對 % 在 0.3% 基期放大到 33%，在 3% 基期才得 3.3%
+#
+# 剩餘 B 類（仍用相對 %，標記 tech-debt，非優先場景）：
+#   GDP Growth Rate / GDP    — 衰退期接近 0% 基期最危險，但台灣觀測頻率低
+#   Unemployment Rate        — 充分就業期 ~4% 基期，5% threshold 約=0.2pp，可接受
+#   Interest Rate / Fed Funds Rate — 零利率期失真嚴重，但現已進入升息後環境
+#   Industrial Production / Retail Sales — MoM 低基期偶發，非每月必現
+#   PMI 系列 / Consumer Confidence       — 指數型，相對 % 尚在可接受範圍
+#
+# 方案 B（Z-score 標準化）需要歷史分布資料，Phase 6 考慮。
 # ──────────────────────────────────────────────────────────────────────
 _LARGE_SURPRISE_PCT: float = 0.20   # |surprise_pct| ≥ 20% → large
 _SMALL_SURPRISE_PCT: float = 0.05   # |surprise_pct| < 5%  → in_line
+
+# Indicators switched to absolute pp-difference surprise (TD-MACRO-01 partial fix).
+# These are Phase 5's highest-frequency triggers; Taiwan CPI base is often 1-2%.
+PP_THRESHOLD_CATEGORIES: frozenset[str] = frozenset({
+    "CPI",
+    "Core CPI",
+    "PCE Price Index",
+    "Core PCE Price Index",
+    "Inflation Rate",
+    "Core Inflation Rate",
+})
+
+# Absolute pp thresholds for PP_THRESHOLD_CATEGORIES.
+# ⚠️ 暫定值：基於 Fed 0.1pp increments 設計；未經回測最佳化。
+#   0.10pp — 市場有注意但反應有限的小幅偏差（e.g. CPI 2.3% vs 2.2%）
+#   0.30pp — 明顯超越預期，引發市場重新定價（e.g. CPI 2.5% vs 2.2%）
+_LARGE_SURPRISE_PP: float = 0.30
+_SMALL_SURPRISE_PP: float = 0.10
 
 # Final signal thresholds
 # ⚠️ 暫定值：±0.15，未經回測最佳化
@@ -289,7 +313,10 @@ def compute_surprise_pct(actual: float, consensus: float) -> float:
 
 def classify_surprise(surprise_pct: float) -> str:
     """
-    Map relative surprise to a categorical label.
+    Map relative surprise (fraction of |consensus|) to a categorical label.
+
+    For absolute-value indicators (NFP, Claims, Trade Balance) only.
+    For PP_THRESHOLD_CATEGORIES use classify_surprise_pp() instead.
 
     Returns: "large_beat" | "beat" | "in_line" | "miss" | "large_miss"
     Thresholds are ⚠️ 暫定值.
@@ -303,6 +330,34 @@ def classify_surprise(surprise_pct: float) -> str:
     if surprise_pct <= -_LARGE_SURPRISE_PCT:
         return "large_miss"
     if surprise_pct <= -_SMALL_SURPRISE_PCT:
+        return "miss"
+    return "in_line"
+
+
+def classify_surprise_pp(pp_diff: float) -> str:
+    """
+    Map absolute percentage-point surprise to a categorical label.
+
+    Used for PP_THRESHOLD_CATEGORIES (CPI, Core CPI, PCE, Core PCE,
+    Inflation Rate, Core Inflation Rate) where dividing by |consensus|
+    inflates the surprise in low-base-rate environments.
+
+    pp_diff = compute_surprise(actual, consensus)  # actual − consensus
+
+    Thresholds: ⚠️ 暫定值 — 0.10pp (small) / 0.30pp (large)
+    Based on Fed's typical monitoring granularity; not back-tested.
+
+    Returns: "large_beat" | "beat" | "in_line" | "miss" | "large_miss"
+    """
+    if math.isnan(pp_diff):
+        return "in_line"
+    if pp_diff >= _LARGE_SURPRISE_PP:
+        return "large_beat"
+    if pp_diff >= _SMALL_SURPRISE_PP:
+        return "beat"
+    if pp_diff <= -_LARGE_SURPRISE_PP:
+        return "large_miss"
+    if pp_diff <= -_SMALL_SURPRISE_PP:
         return "miss"
     return "in_line"
 
@@ -367,7 +422,7 @@ def _detect_hot_data_warning(events_with_scores: list[tuple[MacroEvent, int]]) -
 def compute_macro_score(
     events: list[MacroEvent],
     as_of: datetime,
-) -> tuple[float, list[tuple[MacroEvent, int, float, float]]]:
+) -> tuple[float, list[tuple[MacroEvent, int, float, float, str]]]:
     """
     Aggregate weighted event scores into a single market signal score.
 
@@ -375,22 +430,29 @@ def compute_macro_score(
     -------
     (score, event_details)
     score        : float in [-1, +1]; positive = net bullish macro backdrop
-    event_details: list of (event, market_direction, surprise_pct, weight)
-                   for building Evidence and narrative
+    event_details: list of (event, market_direction, surprise_metric, weight, label)
+      surprise_metric — absolute pp diff for PP_THRESHOLD_CATEGORIES;
+                        relative fraction (pct) for all other categories.
+      label           — pre-computed classify result ("beat", "in_line", etc.)
 
     Scoring formula per event:
       importance_weight = IMPORTANCE_WEIGHTS.get(event.importance, 1.0)
       recency_weight    = exp decay from release_date
-      surprise_weight   = min(|surprise_pct|, 0.5)  # cap at 50% deviation
-      direction         = event_market_direction(category, sign(surprise_pct))
+      surprise_weight   = min(|surprise_metric|, 0.5)
+        pp-type : typically 0.10–0.50pp → cap at 0.5pp
+        pct-type: typically 0.05–1.0+  → cap at 50%
+      direction         = event_market_direction(category, sign(surprise_metric))
       contribution      = direction × surprise_weight × importance_weight × recency_weight
 
     Normalise by sum of (importance_weight × recency_weight) across all events
     with computable surprises.
 
     ⚠️ 暫定加權公式：未經回測，各權重組合方式可後期調校。
+    Note: sur_w scale differs between pp-type and pct-type categories, so
+    cross-category contributions are not perfectly comparable. Acceptable for
+    Phase 5; Phase 6 should consider Z-score normalisation (TD-MACRO-01).
     """
-    details: list[tuple[MacroEvent, int, float, float]] = []
+    details: list[tuple[MacroEvent, int, float, float, str]] = []
     total_raw_weight = 0.0
     weighted_sum = 0.0
 
@@ -398,16 +460,24 @@ def compute_macro_score(
         if event.actual is None or event.consensus is None:
             continue
 
-        spct = compute_surprise_pct(event.actual, event.consensus)
-        if math.isnan(spct):
-            continue
+        if event.category in PP_THRESHOLD_CATEGORIES:
+            # Absolute pp path — TD-MACRO-01 partial fix for high-frequency
+            # inflation indicators where low consensus base inflates relative %.
+            surprise_metric = compute_surprise(event.actual, event.consensus)
+            label = classify_surprise_pp(surprise_metric)
+        else:
+            # Relative % path for absolute-value and remaining B-type indicators.
+            surprise_metric = compute_surprise_pct(event.actual, event.consensus)
+            if math.isnan(surprise_metric):
+                continue
+            label = classify_surprise(surprise_metric)
 
-        surprise_sign = 1 if spct > 0 else (-1 if spct < 0 else 0)
+        surprise_sign = 1 if surprise_metric > 0 else (-1 if surprise_metric < 0 else 0)
         direction = event_market_direction(event.category, surprise_sign)
 
         imp_w = IMPORTANCE_WEIGHTS.get(event.importance, 1.0)
         rec_w = _recency_weight(event.release_date, as_of)
-        sur_w = min(abs(spct), 0.5)   # cap to avoid single extreme event dominating
+        sur_w = min(abs(surprise_metric), 0.5)   # cap: pp→0.5pp, pct→50%
 
         raw_weight = imp_w * rec_w
         contribution = direction * sur_w * raw_weight
@@ -415,7 +485,7 @@ def compute_macro_score(
         weighted_sum += contribution
         total_raw_weight += raw_weight
 
-        details.append((event, direction, spct, raw_weight))
+        details.append((event, direction, surprise_metric, raw_weight, label))
 
     if total_raw_weight == 0.0:
         return 0.0, details
@@ -455,7 +525,7 @@ _DIRECTION_LABEL: dict[int, str] = {
 
 
 def _build_narrative(
-    events_with_details: list[tuple[MacroEvent, int, float, float]],
+    events_with_details: list[tuple[MacroEvent, int, float, float, str]],
     score: float,
     signal: Signal,
     hot_data_warning: bool,
@@ -480,10 +550,10 @@ def _build_narrative(
     }
     parts.append(signal_desc.get(signal, "總經面方向未明"))
 
-    # Per-event highlights (top 2 by weight)
+    # Per-event highlights (top 2 by weight) — label pre-computed in compute_macro_score
     top_events = sorted(events_with_details, key=lambda x: x[3], reverse=True)[:2]
-    for event, direction, spct, _w in top_events:
-        label = _SURPRISE_LABEL.get(classify_surprise(spct), "不明")
+    for event, direction, _metric, _w, label_key in top_events:
+        label = _SURPRISE_LABEL.get(label_key, "不明")
         dir_desc = _DIRECTION_LABEL.get(direction, "不明")
         parts.append(
             f"{event.country} {event.category}：{label}，{dir_desc}"
@@ -562,22 +632,24 @@ def _node_compute(state: MacroAgentState) -> MacroAgentState:
 
     try:
         score, details = compute_macro_score(events, asof)
-        events_with_scores = [(e, d) for (e, d, _, _) in details]
+        events_with_scores = [(e, d) for (e, d, _, _, _) in details]
         hot_warning = _detect_hot_data_warning(events_with_scores)
 
         # Summarise per-event surprise labels for metrics
         event_summaries: list[dict[str, Any]] = []
-        for event, direction, spct, weight in details:
+        for event, direction, surprise_metric, weight, label in details:
+            is_pp = event.category in PP_THRESHOLD_CATEGORIES
             event_summaries.append({
-                "category":    event.category,
-                "country":     event.country,
-                "actual":      event.actual,
-                "consensus":   event.consensus,
-                "surprise_pct": round(spct, 4),
-                "label":       classify_surprise(spct),
-                "direction":   direction,
-                "importance":  event.importance,
-                "release_date": event.release_date.isoformat(),
+                "category":              event.category,
+                "country":               event.country,
+                "actual":                event.actual,
+                "consensus":             event.consensus,
+                "surprise_metric":       round(surprise_metric, 4),
+                "surprise_metric_type":  "pp" if is_pp else "pct",
+                "label":                 label,
+                "direction":             direction,
+                "importance":            event.importance,
+                "release_date":          event.release_date.isoformat(),
             })
 
         computed: dict[str, Any] = {
@@ -610,7 +682,7 @@ def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
     score: float = float(computed.get("macro_score", 0.0))
     no_events: bool = bool(computed.get("no_recent_events", True))
     hot_warning: bool = bool(computed.get("hot_data_warning", False))
-    details: list[tuple[MacroEvent, int, float, float]] = computed.get("_details", [])
+    details: list[tuple[MacroEvent, int, float, float, str]] = computed.get("_details", [])
     degraded: bool = any("[降級]" in e for e in errors)
 
     signal = _score_to_signal(score)
@@ -632,12 +704,12 @@ def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
 
     # Evidence — one per event with actual vs consensus
     key_evidence: list[Evidence] = []
-    for event, direction, spct, _w in sorted(details, key=lambda x: x[3], reverse=True)[:5]:
+    for event, direction, _metric, _w, label in sorted(details, key=lambda x: x[3], reverse=True)[:5]:
         key_evidence.append(
             Evidence(
                 claim=(
                     f"{event.country} {event.category} "
-                    f"[{_SURPRISE_LABEL.get(classify_surprise(spct), '不明')}]"
+                    f"[{_SURPRISE_LABEL.get(label, '不明')}]"
                 ),
                 value=event.actual,
                 source=f"macro:{event.category.lower().replace(' ', '_')}:{event.country.lower().replace(' ', '_')}",
@@ -651,7 +723,7 @@ def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
         completeness = 0.0
     staleness_sec = 0.0
     if details:
-        oldest = min(e.release_date for (e, _, _, _) in details)
+        oldest = min(e.release_date for (e, _, _, _, _) in details)
         oldest_naive = oldest.replace(tzinfo=None) if oldest.tzinfo else oldest
         asof_naive = asof.replace(tzinfo=None) if asof.tzinfo else asof
         staleness_sec = max(0.0, (asof_naive - oldest_naive).total_seconds())
