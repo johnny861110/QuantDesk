@@ -112,19 +112,43 @@ def compute_macd(
 
 def compute_rsi(close: np.ndarray, period: int = 14) -> float:
     """
-    Simple RSI using average gain / average loss over last *period* diffs.
+    Wilder's RSI (J. Welles Wilder, *New Concepts in Technical Trading Systems*, 1978).
 
-    Returns 50.0 if there is not enough data (< 2 bars).
-    Returns 100.0 if average loss == 0 (pure uptrend within window).
+    Algorithm
+    ---------
+    1. Compute *period* price diffs.  Seed avg_gain and avg_loss with their
+       simple mean (standard Wilder initialisation).
+    2. For each subsequent diff *d*:
+           avg_gain = (avg_gain × (period−1) + max(d, 0)) / period
+           avg_loss = (avg_loss × (period−1) + max(−d, 0)) / period
+       This EMA-like recursion is Wilder's smoothing — NOT a rolling simple
+       average of the last *period* diffs.  The two are numerically distinct
+       and diverge on mixed-direction series.
+    3. RS = avg_gain / avg_loss ; RSI = 100 − 100 / (1 + RS)
+
+    Minimum bars required: period + 1.
+
+    Edge cases
+    ----------
+    - len(close) < period + 1  : insufficient data → 50.0
+    - avg_gain == avg_loss == 0 : flat series      → 50.0
+    - avg_loss == 0             : pure uptrend     → 100.0
     """
-    if len(close) < 2:
+    if len(close) < period + 1:
         return 50.0
-    diffs = np.diff(close)
-    window = diffs[-period:] if len(diffs) >= period else diffs
-    gains = window[window > 0]
-    losses = window[window < 0]
-    avg_gain = float(np.mean(gains)) if len(gains) > 0 else 0.0
-    avg_loss = float(np.mean(np.abs(losses))) if len(losses) > 0 else 0.0
+    diffs  = np.diff(close.astype(np.float64))
+    gains  = np.maximum(diffs, 0.0)
+    losses = np.maximum(-diffs, 0.0)
+
+    # Seed: simple average of first `period` diffs
+    avg_gain = float(gains[:period].mean())
+    avg_loss = float(losses[:period].mean())
+
+    # Wilder's recursive smoothing for all subsequent diffs
+    for i in range(period, len(diffs)):
+        avg_gain = (avg_gain * (period - 1) + float(gains[i])) / period
+        avg_loss = (avg_loss * (period - 1) + float(losses[i])) / period
+
     if avg_gain == 0.0 and avg_loss == 0.0:
         return 50.0
     if avg_loss == 0.0:
@@ -141,12 +165,16 @@ def compute_stochastic(
     d_period: int = 3,
 ) -> tuple[float, float]:
     """
-    Slow Stochastic %K and %D.
+    Slow Stochastic %K and %D — 台股慣用的慢速 KD。
 
-    raw_%K[i] = (close[i] - lowest_low over k_period ending at i) /
-                (highest_high over k_period ending at i - lowest_low) * 100
-    %K = 3-period SMA of raw_%K (smoothed)
-    %D = 3-period SMA of %K
+    採用台股慣用的**慢速 KD（Slow Stochastic）**，RSV 經過兩次 d_period 日 SMA 平滑：
+      raw_%K[i]（即 RSV）= (close[i] − lowest_low_{k_period}) /
+                            (highest_high_{k_period} − lowest_low_{k_period}) × 100
+      %K = d_period-period SMA of raw_%K
+      %D = d_period-period SMA of %K
+
+    與歐美常見的 **Fast Stochastic（無平滑，raw_%K 直接輸出為 %K）** 不同。
+    若未來對接美股技術面分析，需確認是否要切換或另外提供 Fast 版本。
 
     Returns (K, D).
     Returns (50.0, 50.0) if there is not enough data.
@@ -315,6 +343,19 @@ def _determine_signal_and_confidence(
     avg > +0.30 → BULLISH
     avg < -0.30 → BEARISH
     else        → NEUTRAL
+
+    Threshold rationale
+    -------------------
+    With 7 binary factors each in {−1, 0, +1}, the possible avg_score values are
+    integer multiples of 1/7: …, −2/7≈−0.286, −1/7≈−0.143, 0, +1/7, +2/7, +3/7≈+0.429, …
+    ±0.30 sits between 2/7 (≈0.286) and 3/7 (≈0.429), so the effective rule is:
+      BULLISH  when net-bullish factor count ≥ 3  (#bullish − #bearish ≥ 3)
+      BEARISH  when net-bearish factor count ≥ 3
+      NEUTRAL  when net agreement ≤ 2 in either direction
+    Expressing it as "at least 3 net factors same direction" is more intuitive
+    than the decimal 0.30 for communicating to stakeholders.
+    ⚠️ 暫定閾值：3/7 為直覺設定，未經統計最佳化。若樣本回測後需調整，
+    改這裡的 0.30 並同步更新上方說明即可（等效為改「至少幾個因子同向」）。
 
     Confidence
     ----------

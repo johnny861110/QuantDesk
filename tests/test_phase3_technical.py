@@ -143,6 +143,44 @@ def test_rsi_all_down() -> None:
     assert result == pytest.approx(0.0)
 
 
+def test_rsi_wilder_smoothing() -> None:
+    """
+    Verify Wilder's EMA-like smoothing using a hand-computed exact reference.
+
+    Sequence: [1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2, 1, 2]  (16 bars)
+
+    First 14 diffs: +1,+1,+1,+1,+1,+1,+1,−1,−1,−1,−1,−1,−1,−1
+      → 7 gains of +1, 7 losses of +1
+      Seed: avg_gain = 7/14 = 1/2,  avg_loss = 7/14 = 1/2
+
+    15th diff (index 14): +1  (gain=1, loss=0)
+    Wilder smoothing step:
+      avg_gain = (1/2 × 13 + 1) / 14 = 15/28
+      avg_loss = (1/2 × 13 + 0) / 14 = 13/28
+      RS  = (15/28) / (13/28) = 15/13
+      RSI = 100 − 100/(1 + 15/13)
+           = 100 − 100 × 13/28
+           = 375/7
+           ≈ 53.5714...
+
+    This reference is derived from exact fractions with no floating-point
+    approximation, making it independent of any other RSI implementation.
+    Unlike a simple-average RSI (which would re-average the last 14 diffs
+    and return 50.0 for the same data), Wilder's smoothing produces 375/7.
+    The difference proves the two algorithms are distinct.
+    """
+    prices = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+                       7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 2.0])
+    result = compute_rsi(prices, period=14)
+    expected = 375.0 / 7.0   # exact rational: ≈ 53.57142857...
+    assert result == pytest.approx(expected, rel=1e-9), (
+        f"Expected Wilder RSI = 375/7 ≈ {expected:.8f}, got {result:.8f}. "
+        "If this fails, the implementation is using simple-average RSI instead of "
+        "Wilder's EMA smoothing — they give identical results only on degenerate "
+        "(all-up / all-down / flat) series."
+    )
+
+
 # ─── MACD ─────────────────────────────────────────────────────────────────────
 
 def test_macd_structure() -> None:
