@@ -30,10 +30,18 @@ class HorizonResult:
         範圍 [0, 1]；越高代表層內方向越一致，越低代表層內分歧越大。
 
     evidence_confidence（底層信心）
-        各貢獻 agent 的 raw confidence 以 (completeness × SOURCE_RELIABILITY)
-        為權重的加權平均，反映該層底層證據本身的可信程度。
-        例：LONG 層只有 FUNDAMENTAL(conf=0.75) → evidence_confidence=0.75。
-        範圍 [0, 1]；這是「這層的訊號有多可信」的真實估算。
+        公式：Σ(eff_weight_i) / Σ(rel_i)
+            = Σ(confidence_i × completeness_i × rel_i) / Σ(rel_i)
+
+        completeness 在分子（不在分母），所以部分覆蓋的資料會被懲罰：
+          MACRO(conf=0.60, compl=1.00) → evidence_confidence = 0.60
+          MACRO(conf=0.60, compl=0.67) → evidence_confidence = 0.60 × 0.67 = 0.402
+
+        若改用 Σ(c×bw)/Σ(bw)（bw=compl×rel），compl 同時出現在分子與分母會
+        互相抵銷，導致 compl=0.67 與 compl=1.0 的結果相同——那才是 bug。
+
+        範圍 [0, 1]；這是「這層的訊號有多可信」的真實估算，同時考慮了
+        來源可靠度（rel）、資料完整性（compl）和分析信心（confidence）。
     """
     direction: Signal
     consensus_share: float          # 方向一致度（前身：weighted_confidence）

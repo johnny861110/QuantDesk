@@ -103,9 +103,16 @@ def _compute_horizon_result(
       evidence_confidence — 底層 raw confidence 的加權平均（底層信心）
     """
     contributors: list[tuple[AgentType, Signal, float]] = []
-    # 用於計算 evidence_confidence：(raw_confidence, base_weight)
-    # base_weight = completeness × SOURCE_RELIABILITY（不含 confidence 因子）
-    conf_base: list[tuple[float, float]] = []
+    # 用於計算 evidence_confidence：(eff_weight, rel)
+    # evidence_confidence = Σ(eff_weight) / Σ(rel)
+    #                     = Σ(conf × compl × rel) / Σ(rel)
+    # 不用 base_weight（compl×rel）做分母，否則 compl 同時出現在分子與分母會互相消除：
+    #   Σ(conf × compl×rel) / Σ(compl×rel) → compl 在單一來源時直接抵銷，
+    #   導致 completeness=0.67 和 completeness=1.0 的 evidence_confidence 完全相同。
+    # 用 rel 做分母，compl 只在分子，才能正確懲罰部分覆蓋的資料：
+    #   MACRO(conf=0.60, compl=0.67, rel=0.85) → evidence_confidence = 0.60×0.67 = 0.402
+    #   MACRO(conf=0.60, compl=1.00, rel=0.85) → evidence_confidence = 0.60×1.00 = 0.600
+    eff_rel_pairs: list[tuple[float, float]] = []
     excluded: list[AgentType] = []
     exc_reasons: dict[AgentType, str] = {}
     participating: list[AgentType] = []
@@ -117,10 +124,9 @@ def _compute_horizon_result(
             exc_reasons[sig.agent] = reason
             continue
         rel = SOURCE_RELIABILITY.get(sig.agent, 0.0)
-        base_weight = sig.data_quality.completeness * rel
-        eff_weight = sig.confidence * base_weight
+        eff_weight = sig.confidence * sig.data_quality.completeness * rel
         contributors.append((sig.agent, sig.signal, eff_weight))
-        conf_base.append((sig.confidence, base_weight))
+        eff_rel_pairs.append((eff_weight, rel))
         participating.append(sig.agent)
 
     if not contributors:
@@ -162,12 +168,12 @@ def _compute_horizon_result(
     winning_signal = max(direction_weights, key=lambda s: direction_weights[s])
     consensus_share = direction_weights[winning_signal] / total_eff_weight
 
-    # ── evidence_confidence：raw confidence 以 base_weight 為權加權平均 ──
-    # = Σ(confidence_i × base_weight_i) / Σ(base_weight_i)
-    # 不把 confidence 自身再乘進來，避免高信心 agent 的基數過度自我放大。
-    total_base_weight = sum(bw for _, bw in conf_base)
-    if total_base_weight > 0.0:
-        evidence_confidence = sum(c * bw for c, bw in conf_base) / total_base_weight
+    # ── evidence_confidence = Σ(eff_weight_i) / Σ(rel_i) ───────────────────
+    # 等價於：conf×compl 的 reliability 加權平均。
+    # compl 留在分子（不在分母），確保部分覆蓋的資料被正確懲罰。
+    total_rel = sum(r for _, r in eff_rel_pairs)
+    if total_rel > 0.0:
+        evidence_confidence = sum(ew for ew, _ in eff_rel_pairs) / total_rel
     else:
         evidence_confidence = 0.0
 
