@@ -94,7 +94,7 @@ hard_constraints: []
 key_evidence:
   ("United States Non Farm Payrolls [大幅超越預期]",
    source="macro:non_farm_payrolls:united_states")
-     → actual=256K vs consensus=185K, pp_surprise=+38.4% (large_beat)
+     → actual=256K vs consensus=185K, surprise_pct=+38.4% (relative %, 絕對數值型用 pct 路徑)
   ("United States CPI [小幅不如預期]",
    source="macro:cpi:united_states")
      → actual=2.9% vs consensus=3.1%, pp=-0.2pp → "miss" (pp path)
@@ -531,10 +531,16 @@ def _should_exclude_from_directional_vote(sig: AgentSignal) -> tuple[bool, str]:
         return True, "cross_market is background-only (spec §5.3)"
     if sig.agent == AgentType.RISK:
         return True, "risk agent routes to Layer 1, not directional vote"
-    if sig.confidence <= 0.15:   # LLM failure floor or near-floor
-        return True, f"confidence={sig.confidence:.2f} below threshold (possible degraded output)"
     if sig.data_quality.completeness == 0.0:
-        return True, "completeness=0.0 indicates degraded output (e.g. LLM failure)"
+        # 明確旗標優於隱性閾值：
+        # completeness==0.0 已完整覆蓋兩種已知降級情境：
+        #   (a) news_agent: LLM failure → completeness 強制歸零
+        #   (b) macro_agent: no_recent_events → completeness 強制歸零
+        # 不使用 confidence <= threshold 猜測，因為無法區分
+        # 「正常分析結果剛好低信心」與「降級輸出的信心底線」。
+        # 若未來有 agent 需要表達「低信心但非 degraded」，
+        # 應在 metrics["degraded"]=False 明確標註，而非靠 Supervisor 猜測。
+        return True, "completeness=0.0 indicates degraded output (LLM failure or no data)"
     return False, ""
 ```
 
@@ -569,9 +575,13 @@ def effective_weight(sig: AgentSignal) -> float:
 4. **Source reliability 暫定值**：0.80/0.85/0.60 完全是主觀設定，
    Phase 6 是否建立歷史回測機制讓 reliability 動態調整？
 
-5. **信心門檻 0.15**：`_LLM_FAILURE_CONFIDENCE=0.10` 的 news agent 確實應排除，
-   但若有個「正常分析結果剛好 confidence=0.13」的 agent，該如何區分？
-   需要更明確的旗標（`metrics["degraded"]=True`）還是純粹靠 threshold？
+5. ~~**信心門檻 0.15**~~：**已拍板**。`_should_exclude_from_directional_vote()` 移除
+   `confidence <= 0.15` 條件，只保留 `completeness == 0.0` 這個明確旗標。
+   理由：明確旗標優於隱性閾值——confidence 數值無法區分「正常低信心」與
+   「降級輸出的底線值」；completeness==0.0 已完整覆蓋 news LLM failure 和
+   macro no_recent_events 兩種已知降級情境。未來若有 agent 需要表達
+   「confidence 很低但不是 degraded」，用 `metrics["degraded"]=False` 明確標註，
+   不靠 Supervisor 猜測數值代表什麼。
 
 ---
 
