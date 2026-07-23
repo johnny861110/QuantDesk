@@ -29,6 +29,7 @@ from langgraph.graph import END, StateGraph
 
 from adapters.fundamental_adapter import FundamentalAdapter, FinancialSnapshotWithMeta
 from agents.verifier import check_narrative as _check_narrative_shared
+from observability.langfuse_setup import observe, update_current_span
 from schemas.agent_signal import (
     AgentSignal,
     AgentType,
@@ -453,25 +454,76 @@ def _build_key_evidence(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Langfuse traced wrappers
+# ─────────────────────────────────────────────────────────────────────────────
+
+@observe(name="fundamental_agent:adapter:get_snapshot", as_type="tool")  # type: ignore[misc]
+def _lf_get_snapshot(
+    adapter: FundamentalAdapter,
+    stock_code: str,
+    year: int,
+    quarter: str,
+) -> FinancialSnapshotWithMeta:
+    """Child span: SQLite financial snapshot fetch."""
+    return adapter.get_snapshot(stock_code, year, quarter)
+
+
+@observe(name="fundamental_agent:verifier:run", as_type="tool")  # type: ignore[misc]
+def _lf_verifier_run(
+    meta: FinancialSnapshotWithMeta,
+    metrics: dict[str, Any],
+    narrative: str,
+) -> tuple[list[str], list[str]]:
+    """Child span: Verifier guard (restatement + narrative number check)."""
+    return Verifier.run(meta, metrics, narrative)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LangGraph node functions
 # ─────────────────────────────────────────────────────────────────────────────
 
+@observe(name="fundamental_agent:node_load_data")  # type: ignore[misc]
 def _node_load_data(state: FundamentalAgentState, adapter: FundamentalAdapter) -> dict:
-    meta = adapter.get_snapshot(state["stock_code"], state["year"], state["quarter"])
+    meta = _lf_get_snapshot(adapter, state["stock_code"], state["year"], state["quarter"])
+    update_current_span(input={
+        "stock_code": state["stock_code"],
+        "year": state["year"],
+        "quarter": state["quarter"],
+    }, output={
+        "filing_key": meta.filing_key,
+        "company_name": meta.company_name,
+        "report_period": meta.report_period,
+        "is_restated": meta.is_restated,
+    })
     return {"snapshot": meta}
 
 
+@observe(name="fundamental_agent:node_run_tools")  # type: ignore[misc]
 def _node_run_tools(state: FundamentalAgentState, adapter: FundamentalAdapter) -> dict:
     meta: FinancialSnapshotWithMeta = state["snapshot"]  # type: ignore[assignment]
     metrics, tool_errors = _compute_metrics(meta, adapter)
+    update_current_span(output={
+        "roic": metrics.get("roic"),
+        "wacc": metrics.get("wacc"),
+        "value_creation_gap": metrics.get("value_creation_gap"),
+        "eq_total": metrics.get("eq_total"),
+        "ews_warning_level": metrics.get("ews_warning_level"),
+        "tool_errors": len(tool_errors),
+    })
     return {"metrics": metrics, "errors": tool_errors}
 
 
+@observe(name="fundamental_agent:node_verify")  # type: ignore[misc]
 def _node_verify(state: FundamentalAgentState) -> dict:
     meta: FinancialSnapshotWithMeta = state["snapshot"]  # type: ignore[assignment]
     narrative = state.get("narrative", "")
-    warnings, errors = Verifier.run(meta, state["metrics"], narrative)
+    warnings, errors = _lf_verifier_run(meta, state["metrics"], narrative)  # child span
     hard_constraints = _build_hard_constraints(state["metrics"])
+    update_current_span(output={
+        "verifier_warnings": len(warnings),
+        "verifier_errors": len(errors),
+        "hard_constraints_triggered": [hc.type for hc in hard_constraints],
+    })
     return {
         "warnings": warnings,
         "errors": state.get("errors", []) + errors,
@@ -479,6 +531,7 @@ def _node_verify(state: FundamentalAgentState) -> dict:
     }
 
 
+@observe(name="fundamental_agent:node_synthesize")  # type: ignore[misc]
 def _node_synthesize(state: FundamentalAgentState) -> dict:
     """
     Optional LLM node.  Skipped gracefully if OPENAI_API_KEY is absent.
@@ -489,6 +542,7 @@ def _node_synthesize(state: FundamentalAgentState) -> dict:
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
+        update_current_span(output={"skipped": True, "reason": "no_api_key"})
         return {"narrative": ""}   # Verifier will find no numbers to flag
 
     try:
@@ -509,18 +563,25 @@ def _node_synthesize(state: FundamentalAgentState) -> dict:
             f"早期預警：{m.get('ews_warning_level', 'N/A')}\n"
             f"品質分數：{m.get('quality_score', 'N/A')}\n"
         )
+        update_current_span(input={"model": "gpt-4o-mini", "prompt_length": len(prompt)})
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
         response = llm.invoke([HumanMessage(content=prompt)])
-        return {"narrative": response.content}
-    except Exception:
+        narrative = str(response.content)
+        update_current_span(output={"narrative_length": len(narrative), "llm_ok": True})
+        return {"narrative": narrative}
+    except Exception as exc:
+        update_current_span(output={"skipped": True, "error": str(exc)})
         return {"narrative": ""}
 
 
+@observe(name="fundamental_agent:node_build_signal")  # type: ignore[misc]
 def _node_build_signal(state: FundamentalAgentState) -> dict:
     meta: FinancialSnapshotWithMeta = state["snapshot"]  # type: ignore[assignment]
     metrics = state["metrics"]
     asof = datetime.now(UTC)
 
+    sig_val = _determine_signal(metrics)
+    conf = round(meta.weighted_confidence(), 4)
     signal = AgentSignal(
         agent=AgentType.FUNDAMENTAL,
         target=Target(
@@ -528,8 +589,8 @@ def _node_build_signal(state: FundamentalAgentState) -> dict:
             market="TW",
             asof=asof,
         ),
-        signal=_determine_signal(metrics),
-        confidence=round(meta.weighted_confidence(), 4),
+        signal=sig_val,
+        confidence=conf,
         time_horizon=TimeHorizon.MEDIUM,
         key_evidence=_build_key_evidence(meta, metrics, asof),
         hard_constraints=[HardConstraint(**hc) for hc in state.get("hard_constraints", [])],
@@ -538,6 +599,14 @@ def _node_build_signal(state: FundamentalAgentState) -> dict:
         data_quality=meta.to_data_quality(),
         errors=state.get("warnings", []) + state.get("errors", []),
     )
+    update_current_span(output={
+        "signal": sig_val.value,
+        "confidence": conf,
+        "hard_constraint_breaches": [
+            hc["type"] for hc in state.get("hard_constraints", []) if hc.get("breached")
+        ],
+        "total_errors": len(signal.errors),
+    })
     return {"signal": signal}
 
 
@@ -578,9 +647,18 @@ class FundamentalAgent:
 
         return g.compile()
 
+    @observe(name="fundamental_agent:run")  # type: ignore[misc]
     def run(self, stock_code: str, year: int, quarter: str) -> AgentSignal:
-        """Execute the full agent pipeline and return an AgentSignal."""
-        initial: FundamentalAgentState = {
+        """Execute the full agent pipeline and return an AgentSignal.
+
+        Calls nodes directly (not via graph.invoke) so that the Langfuse
+        @observe() trace context propagates into each node's child span.
+        """
+        update_current_span(input={"stock_code": stock_code, "year": year, "quarter": quarter})
+        adapter = self._adapter
+
+        # Direct sequential node calls — guarantees OTel context propagation.
+        state: FundamentalAgentState = {
             "stock_code": stock_code,
             "year": year,
             "quarter": quarter,
@@ -592,6 +670,15 @@ class FundamentalAgent:
             "narrative": "",
             "signal": None,
         }
-        final = self._graph.invoke(initial)
-        result: AgentSignal = final["signal"]
+        state = {**state, **_node_load_data(state, adapter)}
+        state = {**state, **_node_run_tools(state, adapter)}
+        state = {**state, **_node_verify(state)}
+        state = {**state, **_node_synthesize(state)}
+        state = {**state, **_node_build_signal(state)}
+
+        result: AgentSignal = state["signal"]  # type: ignore[assignment]
+        update_current_span(output={
+            "signal": result.signal.value,
+            "confidence": result.confidence,
+        })
         return result
