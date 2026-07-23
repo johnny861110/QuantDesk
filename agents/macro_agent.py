@@ -65,6 +65,7 @@ from typing import Any, Optional, TypedDict
 from langgraph.graph import END, StateGraph
 
 from adapters.base import DataSourceAdapter
+from adapters.fred_adapter import FREDAdapter
 from adapters.macro_adapter import (
     MacroEvent,
     MacroResult,
@@ -614,13 +615,14 @@ def _node_fetch(state: MacroAgentState) -> MacroAgentState:
     if adapter is None:
         try:
             adapter = TradingEconomicsAdapter(api_key=_require_te_key())
-        except RuntimeError as exc:
-            errors.append(f"[降級] TE API key 不可用：{exc}")
+        except RuntimeError:
+            # TE key 不可用 → 自動 fallback 到 FRED 免費資料
+            # FRED 不需 API key，涵蓋 NFP / CPI / Unemployment / Fed Funds Rate
             errors.append(
-                "[降級] 總經分析不可用：此 signal 為降級輸出，"
-                "請勿與正常分析結果同等對待。"
+                "[降級] TE_API_KEY 未設定，已自動切換至 FRED 免費資料源。"
+                "注意：FRED 無 consensus 值，無法計算 surprise，macro_score 將為 0。"
             )
-            return {**state, "raw_events": [], "pipeline_errors": errors}
+            adapter = FREDAdapter()
 
     countries = state["countries"] or ["united states", "taiwan"]
     try:
@@ -630,7 +632,12 @@ def _node_fetch(state: MacroAgentState) -> MacroAgentState:
             days_back=state["days_back"],
         )
         result: MacroResult = sourced.payload
-        new_state: MacroAgentState = {**state, "raw_events": result.events, "asof": sourced.asof}
+        new_state: MacroAgentState = {
+            **state,
+            "raw_events": result.events,
+            "asof": sourced.asof,
+            "pipeline_errors": errors,   # 保留 fallback 降級訊息
+        }
         update_current_span(output={"event_count": len(result.events), "errors": len(errors)})
         return new_state
     except Exception as exc:

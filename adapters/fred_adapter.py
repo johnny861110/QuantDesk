@@ -45,12 +45,14 @@ FRED_BASE_URL: str = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FRED_TIMEOUT_SEC: int = 20
 
 # category_label → (series_id, unit, importance, frequency)
+# category 名稱刻意對齊 agents/macro_agent.py 的 CATEGORY_DIRECTION 表，
+# 使 compute_macro_score() 能正確辨識 surprise 方向。
 FRED_SERIES: dict[str, tuple[str, str, int, str]] = {
-    "US Non-Farm Payrolls": ("PAYEMS",   "K",  3, "monthly"),
-    "US CPI":               ("CPIAUCSL", "%",  3, "monthly"),
-    "US Unemployment Rate": ("UNRATE",   "%",  3, "monthly"),
-    "US 10Y Treasury Yield":("DGS10",    "%",  3, "daily"),
-    "US Fed Funds Rate":    ("FEDFUNDS", "%",  3, "monthly"),
+    "Non Farm Payrolls": ("PAYEMS",   "K",  3, "monthly"),
+    "CPI":               ("CPIAUCSL", "%",  3, "monthly"),
+    "Unemployment Rate": ("UNRATE",   "%",  3, "monthly"),
+    "Fed Funds Rate":    ("FEDFUNDS", "%",  3, "monthly"),
+    "US 10Y Treasury Yield": ("DGS10", "%", 2, "daily"),    # 無對應 CATEGORY_DIRECTION，importance=2
 }
 
 # ─── FinMind 台灣資料地圖 ─────────────────────────────────────────────────────
@@ -110,7 +112,9 @@ class FREDAdapter(MacroAdapter):
         SourcedData, payload = MacroResult
         """
         fetched_at = datetime.now(UTC)
-        target_series = series or list(FRED_SERIES.keys())
+        # 預設只拉有 consensus 意義的 4 個指標（排除 10Y 殖利率，它沒有 CATEGORY_DIRECTION 對應）
+        default_series = [s for s in FRED_SERIES if s != "US 10Y Treasury Yield"]
+        target_series = series or default_series
 
         all_events: list[MacroEvent] = []
 
