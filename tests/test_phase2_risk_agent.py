@@ -730,3 +730,296 @@ class TestRunRiskAgent:
         syms = signal.metrics["covered_symbols"]
         assert isinstance(syms, list)
         assert len(syms) > 0  # positions.yaml has at least one valid position
+
+
+# ─── Phase 6 P0-2: IV missing fail-safe ──────────────────────────────────────
+
+class TestIVMissingFailSafe:
+    """
+    Phase 6 P0-2: 部分 IV 缺失的 fail-safe 行為。
+
+    Setup: 1 個期貨（TXFF）+ 2 個選擇權（TXO），只有第 1 個選擇權有 greeks_map
+    → n_options=2, n_priced=1, missing_fraction=0.5
+    → confidence deduction = 0.30 × 0.5 = 0.15
+    → confidence = 1.0 − 0.15 = 0.85
+    """
+
+    @pytest.fixture
+    def _partial_iv_positions(self) -> list[Position]:
+        """1 futures + 2 options."""
+        return [
+            Position(
+                symbol="TXFF", instrument_type="futures",
+                quantity=-2, currency="TWD", multiplier=200.0,
+            ),
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=-5, currency="TWD", multiplier=50.0,
+                strike=22500.0, expiry="2026-09-16",
+                option_type="call", style="european",
+            ),
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=3, currency="TWD", multiplier=50.0,
+                strike=22000.0, expiry="2026-09-16",
+                option_type="put", style="european",
+            ),
+        ]
+
+    @pytest.fixture
+    def _partial_greeks_map(self) -> dict[int, GreeksResult]:
+        """Only position index 1 (first TXO) is priced."""
+        from agents.risk.pricing_router import GreeksResult
+        return {
+            1: GreeksResult(
+                price=150.0, delta=-0.35, gamma=0.0001,
+                vega=3.0, theta=-5.0, rho=-0.01,
+                model="black_scholes", iv=0.20,
+            )
+        }
+
+    def test_partial_iv_failure_reduces_confidence_proportionally(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """1/2 options priced → missing_fraction=0.5 → conf = 1.0 − 0.15 = 0.85."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        # missing_fraction = (2 - 1) / 2 = 0.5 → penalty = 0.30 × 0.5 = 0.15
+        assert signal.confidence == pytest.approx(1.0 - 0.30 * 0.5, rel=1e-6)
+
+    def test_partial_iv_failure_annotates_hard_constraints(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """Every hard constraint detail should carry the IV-missing warning."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        for hc in signal.hard_constraints:
+            assert hc.detail is not None
+            assert "IV缺失" in hc.detail, (
+                f"Expected IV-missing note in constraint {hc.type!r} detail: {hc.detail!r}"
+            )
+            assert "1/2" in hc.detail, (
+                f"Expected '1/2' count in constraint {hc.type!r} detail: {hc.detail!r}"
+            )
+
+    def test_partial_iv_failure_sets_verifiable_false(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """Constraints must be machine-readable as unverifiable, not just text-annotated."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        for hc in signal.hard_constraints:
+            assert hc.verifiable is False, (
+                f"Constraint {hc.type!r} should have verifiable=False when IV is missing; "
+                f"got verifiable={hc.verifiable!r}"
+            )
+
+    def test_iv_missing_count_in_metrics(
+        self,
+        _partial_iv_positions: list[Position],
+        _partial_greeks_map: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """metrics['iv_missing_count'] must equal n_options − n_priced."""
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=_partial_greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        assert "iv_missing_count" in signal.metrics
+        assert signal.metrics["iv_missing_count"] == 1  # 2 options, 1 priced
+
+    def test_all_iv_priced_no_annotation(
+        self,
+        _partial_iv_positions: list[Position],
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """When all options are priced, no IV-missing annotation and no penalty."""
+        from agents.risk.pricing_router import GreeksResult
+        full_greeks = {
+            1: GreeksResult(
+                price=150.0, delta=-0.35, gamma=0.0001,
+                vega=3.0, theta=-5.0, rho=-0.01,
+                model="black_scholes", iv=0.20,
+            ),
+            2: GreeksResult(
+                price=80.0, delta=0.25, gamma=0.0001,
+                vega=2.5, theta=-4.0, rho=0.01,
+                model="black_scholes", iv=0.20,
+            ),
+        }
+        signal = build_risk_signal(
+            positions=_partial_iv_positions,
+            greeks_map=full_greeks,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        assert signal.metrics["iv_missing_count"] == 0
+        assert signal.confidence == pytest.approx(1.0)
+        for hc in signal.hard_constraints:
+            assert "IV缺失" not in (hc.detail or "")
+            assert hc.verifiable is True
+
+
+# ─── Phase 6 P0-2: IV missing confidence — 連續性與單調性邊界測試 ────────────
+
+class TestIVMissingConfidenceMonotonicity:
+    """
+    _IV_MISSING_CONFIDENCE_PENALTY × missing_fraction 的邊界測試。
+
+    目的：
+      若「部分失敗」和「完全失敗」是兩條獨立 if 分支（例如 if n_priced==0:
+      conf -= 0.30 else: conf -= 0.20），在 0.9 → 1.0 的邊界會出現不連續
+      跳動（gap≈0.10 而非期望的 0.03）。
+      單一線性公式覆蓋全範圍才能保證連續性，這組測試正是驗證此不變式。
+
+    Baseline：無 FX 缺失、無無效部位 → 唯一懲罰來自 IV 缺失。
+      conf = max(0.10, 1.0 − 0.30 × missing_fraction)
+    """
+
+    _MOCK_GR: dict  = {}   # filled in _conf() to avoid module-level import
+
+    def _conf(
+        self,
+        n_options: int,
+        n_priced: int,
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> float:
+        """Build n_options option positions; put first n_priced into greeks_map."""
+        from agents.risk.pricing_router import GreeksResult
+
+        positions = [
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=-1, currency="TWD", multiplier=50.0,
+                strike=22500.0, expiry="2026-09-16",
+                option_type="call", style="european",
+            )
+            for _ in range(n_options)
+        ]
+        mock_gr = GreeksResult(
+            price=100.0, delta=-0.30, gamma=0.0001,
+            vega=2.0, theta=-4.0, rho=-0.01,
+            model="black_scholes", iv=0.20,
+        )
+        greeks_map = {i: mock_gr for i in range(n_priced)}
+
+        signal = build_risk_signal(
+            positions=positions,
+            greeks_map=greeks_map,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        return signal.confidence
+
+    def test_monotonically_decreasing(
+        self,
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """missing_fraction 0→0.1→0.5→0.9→1.0：confidence 嚴格單調遞減。"""
+        # (n_options, n_priced) → missing_fraction
+        cases = [
+            (10, 10),  # missing_fraction = 0.0
+            (10,  9),  # missing_fraction = 0.1
+            ( 2,  1),  # missing_fraction = 0.5
+            (10,  1),  # missing_fraction = 0.9
+            (10,  0),  # missing_fraction = 1.0 (complete failure)
+        ]
+        confidences = [self._conf(n, k, mock_agg_ok, mock_scenario) for n, k in cases]
+        for i in range(len(confidences) - 1):
+            frac_lo = 1 - cases[i][1] / cases[i][0]
+            frac_hi = 1 - cases[i + 1][1] / cases[i + 1][0]
+            assert confidences[i] > confidences[i + 1], (
+                f"confidence not strictly decreasing at step {i}→{i+1}: "
+                f"conf({frac_lo:.1f})={confidences[i]:.4f} vs "
+                f"conf({frac_hi:.1f})={confidences[i + 1]:.4f}"
+            )
+
+    def test_no_discontinuity_at_complete_failure_boundary(
+        self,
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """最關鍵邊界：partial(9/10) → complete(10/10) 的 gap 必須等於 0.30×(1/10)=0.03。
+
+        若舊的 if n_priced==0: conf -= 0.30 分支殘留，gap 會是 0.30（十倍跳動）。
+        若 partial 用獨立固定扣分（如 -0.20），gap 也會是 0.10（非 0.03）。
+        唯一正確的 gap 是 _IV_MISSING_CONFIDENCE_PENALTY / n_options = 0.30/10 = 0.03。
+        """
+        n = 10
+        conf_partial  = self._conf(n, 1, mock_agg_ok, mock_scenario)   # 9/10 missing
+        conf_complete = self._conf(n, 0, mock_agg_ok, mock_scenario)   # 10/10 missing
+
+        assert conf_partial > conf_complete, (
+            f"partial failure conf ({conf_partial:.4f}) must exceed "
+            f"complete failure conf ({conf_complete:.4f})"
+        )
+        gap = conf_partial - conf_complete
+        assert gap == pytest.approx(0.30 / n, rel=1e-6), (
+            f"Gap at 9/10→10/10 boundary should be 0.30×(1/10)=0.030 (continuous linear). "
+            f"Got gap={gap:.4f}. "
+            f"If gap≈0.30, old flat-penalty branch is still firing. "
+            f"If gap≈0.10, partial and complete failure use different base penalties."
+        )
+
+    def test_exact_values_at_each_fraction(
+        self,
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """精確數值驗證（baseline：無其他懲罰，conf = 1.0 - 0.30 × missing_fraction）。"""
+        cases = [
+            # (n_options, n_priced, missing_fraction, expected_confidence)
+            (10, 10, 0.00, 1.00),   # all priced: zero penalty
+            (10,  9, 0.10, 0.97),   # −0.30×0.1 = −0.03
+            ( 2,  1, 0.50, 0.85),   # −0.30×0.5 = −0.15
+            (10,  1, 0.90, 0.73),   # −0.30×0.9 = −0.27
+            (10,  0, 1.00, 0.70),   # −0.30×1.0 = −0.30  (complete failure)
+        ]
+        for n_opt, n_pr, frac, expected in cases:
+            actual = self._conf(n_opt, n_pr, mock_agg_ok, mock_scenario)
+            assert actual == pytest.approx(expected, abs=1e-9), (
+                f"missing_fraction={frac}: expected conf={expected}, "
+                f"got {actual:.6f} (n={n_opt}, priced={n_pr})"
+            )

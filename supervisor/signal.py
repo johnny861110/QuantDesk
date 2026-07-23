@@ -65,8 +65,9 @@ class SupervisorOutput:
     asof: datetime
     # Layer 1
     hard_constraint_breaches: list[tuple[AgentType, HardConstraint]]
+    unverifiable_constraints: list[tuple[AgentType, HardConstraint]]  # verifiable=False
     risk_override: bool
-    mandatory_warnings: list[str]       # constraint type strings, e.g. ["net_delta_pct_nav"]
+    mandatory_warnings: list[str]       # breached → "type"; unverifiable → "unverifiable:type"
     # Layer 2
     horizon_breakdown: dict[str, HorizonResult]   # key: "short"|"medium"|"long"|"intraday"
     # Layer 3
@@ -79,6 +80,7 @@ class SupervisorOutput:
     confidence: float
     overall_narrative: str
     raw_agent_signals: list[AgentSignal]
+    disclaimer: str
 
     # ── Backward-compat properties for test_phase0 ──────────────────────────
 
@@ -92,10 +94,15 @@ class SupervisorOutput:
         """Formatted warning strings (test_phase0 compat).
         Phase 5 callers should use mandatory_warnings (constraint type list) instead.
         """
-        return [
+        result = [
             f"[風控強制警告] {hc.type} 觸限：目前 {hc.current} vs 上限 {hc.limit}"
             for _, hc in self.hard_constraint_breaches
         ]
+        result += [
+            f"[風控無法驗證] {hc.type}：資料缺失，目前 {hc.current} vs 上限 {hc.limit} 無法確認安全"
+            for _, hc in self.unverifiable_constraints
+        ]
+        return result
 
     @property
     def layered_view(self) -> dict[str, list[AgentSignal]]:

@@ -665,6 +665,19 @@ class TestSupervisorOutputStructure:
         # LONG(BULLISH) should win over SHORT(BEARISH) in overall_recommendation
         assert result.overall_recommendation == Signal.BULLISH
 
+    def test_disclaimer_is_nonempty(self) -> None:
+        """Phase 6 P0-1: disclaimer 欄位必須存在且非空。"""
+        result = Supervisor().aggregate([_sig(AgentType.TECHNICAL, Signal.BULLISH)])
+        assert hasattr(result, "disclaimer")
+        assert isinstance(result.disclaimer, str)
+        assert len(result.disclaimer) > 0
+
+    def test_disclaimer_contains_key_phrase(self) -> None:
+        """disclaimer 必須包含「研究輔助」與「自行判斷」，確認免責聲明內容正確。"""
+        result = Supervisor().aggregate([_sig(AgentType.TECHNICAL, Signal.BULLISH)])
+        assert "研究輔助" in result.disclaimer
+        assert "自行判斷" in result.disclaimer
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 迴歸測試：evidence_confidence 公式 — completeness 不可在分母消除
@@ -834,3 +847,142 @@ class TestEvidenceConfidenceCompletenessRegression:
             "Expected 0.60 × 0.67 = 0.402."
         )
         assert medium_hr.evidence_confidence == pytest.approx(0.60 * 0.67, rel=1e-6)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 6 P0-2: verifiable=False → Layer 1 unverifiable branch
+#
+# 設計原則：
+#   verifiable=False 代表底層 Greeks 缺失，breached=False 不可信。
+#   Supervisor Layer 1 視同 breached=True 觸發 risk_override，
+#   mandatory_warnings 前綴 "unverifiable:{type}" 與 breach 區分。
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _hc_unverifiable(type_: str, current: float, limit: float) -> HardConstraint:
+    """Helper: not breached but verifiable=False (e.g. IV missing → Greeks underestimated)."""
+    return HardConstraint(
+        type=type_, current=current, limit=limit,
+        breached=False,    # measured value looks OK, but measurement is unreliable
+        verifiable=False,  # ← machine-readable flag Supervisor checks
+        detail="  ⚠ IV缺失：部分選擇權未定價，Greeks可能低估",
+    )
+
+
+class TestLayer1UnverifiableConstraints:
+    """Layer 1 必須對 verifiable=False 的 constraint 觸發獨立警告，不依賴 detail 文字。"""
+
+    @pytest.fixture()
+    def signals_with_unverifiable(self) -> list[AgentSignal]:
+        """RISK agent 帶兩個 verifiable=False 的 constraint（breached=False 但不可信）。"""
+        return [
+            _sig(
+                AgentType.RISK,
+                Signal.NEUTRAL,
+                confidence=0.85,
+                horizon=TimeHorizon.SHORT,
+                hard_constraints=[
+                    _hc_unverifiable("net_delta_pct_nav", current=-0.10, limit=0.30),
+                    _hc_unverifiable("gamma_limit", current=50_000.0, limit=1_000_000.0),
+                    _hc_unverifiable("vega_limit", current=100_000.0, limit=500_000.0),
+                ],
+            ),
+            _sig(AgentType.TECHNICAL, Signal.BULLISH, confidence=0.70),
+        ]
+
+    def test_unverifiable_triggers_risk_override(
+        self, signals_with_unverifiable: list[AgentSignal],
+    ) -> None:
+        """verifiable=False → risk_override=True（即使 breached=False）。"""
+        result = Supervisor().aggregate(signals_with_unverifiable)
+        assert result.risk_override is True, (
+            "risk_override must be True when any constraint has verifiable=False; "
+            "breached=False alone cannot confirm safety when Greeks are underestimated."
+        )
+
+    def test_unverifiable_in_mandatory_warnings_with_prefix(
+        self, signals_with_unverifiable: list[AgentSignal],
+    ) -> None:
+        """mandatory_warnings 包含 'unverifiable:{type}' 前綴，與 breached 區分。"""
+        result = Supervisor().aggregate(signals_with_unverifiable)
+        types = {"net_delta_pct_nav", "gamma_limit", "vega_limit"}
+        for t in types:
+            assert f"unverifiable:{t}" in result.mandatory_warnings, (
+                f"Expected 'unverifiable:{t}' in mandatory_warnings; "
+                f"got {result.mandatory_warnings}"
+            )
+
+    def test_unverifiable_not_in_hard_constraint_breaches(
+        self, signals_with_unverifiable: list[AgentSignal],
+    ) -> None:
+        """unverifiable constraints appear in unverifiable_constraints, NOT hard_constraint_breaches."""
+        result = Supervisor().aggregate(signals_with_unverifiable)
+        assert result.hard_constraint_breaches == [], (
+            "verifiable=False constraints should NOT appear in hard_constraint_breaches "
+            "(those are for breached=True only)"
+        )
+        assert len(result.unverifiable_constraints) == 3
+
+    def test_unverifiable_in_supervisor_output_field(
+        self, signals_with_unverifiable: list[AgentSignal],
+    ) -> None:
+        """SupervisorOutput.unverifiable_constraints 包含所有 verifiable=False 的 constraint。"""
+        result = Supervisor().aggregate(signals_with_unverifiable)
+        types_found = {hc.type for _, hc in result.unverifiable_constraints}
+        assert "net_delta_pct_nav" in types_found
+        assert "gamma_limit" in types_found
+        assert "vega_limit" in types_found
+
+    def test_unverifiable_narrative_contains_human_review_note(
+        self, signals_with_unverifiable: list[AgentSignal],
+    ) -> None:
+        """Narrative 必須說明有待人工複核的風控指標（非只靠 detail 文字）。"""
+        result = Supervisor().aggregate(signals_with_unverifiable)
+        assert "人工複核" in result.overall_narrative or "待人工" in result.overall_narrative, (
+            f"Expected human-review note in narrative; got: {result.overall_narrative!r}"
+        )
+
+    def test_forced_warnings_includes_unverifiable(
+        self, signals_with_unverifiable: list[AgentSignal],
+    ) -> None:
+        """backward-compat: forced_warnings 必須也包含 unverifiable 的格式化訊息。"""
+        result = Supervisor().aggregate(signals_with_unverifiable)
+        unverifiable_msgs = [w for w in result.forced_warnings if "無法驗證" in w]
+        assert len(unverifiable_msgs) == 3, (
+            f"Expected 3 '無法驗證' warnings in forced_warnings; got {result.forced_warnings}"
+        )
+
+    def test_breach_and_unverifiable_both_trigger_override(self) -> None:
+        """breached=True + verifiable=False 同時存在：兩者都進各自的 list，risk_override=True。"""
+        signals = [
+            _sig(
+                AgentType.RISK,
+                Signal.BEARISH,
+                hard_constraints=[
+                    _hc("net_delta_pct_nav", current=-2.5, limit=0.30, breached=True),
+                    _hc_unverifiable("gamma_limit", current=50_000.0, limit=1_000_000.0),
+                ],
+            ),
+        ]
+        result = Supervisor().aggregate(signals)
+        assert result.risk_override is True
+        assert len(result.hard_constraint_breaches) == 1
+        assert result.hard_constraint_breaches[0][1].type == "net_delta_pct_nav"
+        assert len(result.unverifiable_constraints) == 1
+        assert result.unverifiable_constraints[0][1].type == "gamma_limit"
+        assert "net_delta_pct_nav" in result.mandatory_warnings
+        assert "unverifiable:gamma_limit" in result.mandatory_warnings
+
+    def test_all_verifiable_no_unverifiable_field(self) -> None:
+        """所有 constraint 都 verifiable=True → unverifiable_constraints 為空 list。"""
+        signals = [
+            _sig(
+                AgentType.RISK,
+                Signal.NEUTRAL,
+                hard_constraints=[
+                    _hc("net_delta_pct_nav", current=-0.10, limit=0.30, breached=False),
+                ],
+            ),
+        ]
+        result = Supervisor().aggregate(signals)
+        assert result.unverifiable_constraints == []
+        assert result.risk_override is False

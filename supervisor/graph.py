@@ -204,12 +204,20 @@ def _build_narrative(output: SupervisorOutput) -> str:
     """
     parts: list[str] = []
 
-    if output.risk_override:
+    if output.hard_constraint_breaches:
         parts.append("⚠️ 風控強制降級：")
         for _, hc in output.hard_constraint_breaches:
             detail = f"（{hc.detail}）" if hc.detail else ""
             parts.append(
                 f"  [{hc.type}] 觸限：目前 {hc.current}，上限 {hc.limit}{detail}"
+            )
+
+    if output.unverifiable_constraints:
+        parts.append("⚠️ 風控待人工複核（底層 Greeks 缺失，無法確認安全）：")
+        for _, hc in output.unverifiable_constraints:
+            detail = f"（{hc.detail}）" if hc.detail else ""
+            parts.append(
+                f"  [{hc.type}] 目前值 {hc.current}，限制 {hc.limit}{detail}"
             )
 
     for h in _HORIZON_PRIORITY:
@@ -273,9 +281,20 @@ class Supervisor:
             for hc in sig.hard_constraints
             if hc.breached
         ]
-        risk_override = bool(breaches)
-        # mandatory_warnings 存 constraint type string（方便下游 `in` 判斷）
-        mandatory_warnings: list[str] = [hc.type for _, hc in breaches]
+        # unverifiable: verifiable=False → 無法確認 breached=False 是否可信
+        # 保守處置：視同需人工複核（與 breached=True 同等觸發 risk_override）
+        unverifiable: list[tuple[AgentType, HardConstraint]] = [
+            (sig.agent, hc)
+            for sig in signals
+            for hc in sig.hard_constraints
+            if not hc.verifiable
+        ]
+        risk_override = bool(breaches) or bool(unverifiable)
+        # mandatory_warnings: breached → type; unverifiable → "unverifiable:{type}"
+        mandatory_warnings: list[str] = (
+            [hc.type for _, hc in breaches]
+            + [f"unverifiable:{hc.type}" for _, hc in unverifiable]
+        )
 
         # ── Layer 2: 時間框架分層 ─────────────────────────────────────────────
         horizon_groups: dict[str, list[AgentSignal]] = {}
@@ -325,6 +344,7 @@ class Supervisor:
             target=target,
             asof=asof,
             hard_constraint_breaches=breaches,
+            unverifiable_constraints=unverifiable,
             risk_override=risk_override,
             mandatory_warnings=mandatory_warnings,
             horizon_breakdown=horizon_breakdown,
@@ -336,6 +356,11 @@ class Supervisor:
             confidence=final_confidence,
             overall_narrative="",          # filled below
             raw_agent_signals=signals,
+            disclaimer=(
+                "本系統輸出為研究輔助與風險提示，"
+                "非自動下單或保證獲利建議，"
+                "實際投資決策需自行判斷並承擔風險"
+            ),
         )
         output.overall_narrative = _build_narrative(output)
         return output

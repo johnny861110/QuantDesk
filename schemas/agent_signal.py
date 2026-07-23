@@ -67,12 +67,20 @@ class Evidence(BaseModel):
 
 
 class HardConstraint(BaseModel):
-    """風控專用。breached=True 時 Supervisor 必須強制降級，不由 LLM 裁量。"""
+    """風控專用。breached=True 時 Supervisor 必須強制降級，不由 LLM 裁量。
+
+    verifiable=False 時代表底層資料不足、無法確認 breached 是否為真實安全結論。
+    Supervisor Layer 1 同等對待 breached=True 與 verifiable=False，均觸發
+    risk_override 與 mandatory_warning，差別只在 mandatory_warnings 前綴：
+      breached=True   → "net_delta_pct_nav"
+      verifiable=False → "unverifiable:net_delta_pct_nav"
+    """
     type: str  # e.g. "gamma_limit", "net_delta_pct_nav", "sector_concentration"
     current: float
     limit: float
     breached: bool
     detail: str | None = None
+    verifiable: bool = True   # False → 底層 Greeks 缺失，無法確認結論可靠
 
 
 class DataQuality(BaseModel):
