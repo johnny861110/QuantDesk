@@ -206,25 +206,41 @@ def _compute_hitl_gate(
     """
     HITL Gate 機器可讀觸發判斷（不解析 narrative 文字）。
 
-    三種獨立觸發條件：
-    1. overall confidence < _HITL_CONFIDENCE_THRESHOLD
-       → reason: "low_confidence:{conf:.2f}"
-    2. hard_constraint_breach 或 unverifiable_constraint（各自獨立項目）
-       → reason: "hard_constraint_breach:{hc.type}" 或
-                 "unverifiable_constraint:{hc.type}"
-    3. fundamental agent 的 EWS critical（直接讀 metrics，獨立於 hard_constraints）
-       → reason: "ews_critical"
-       理由：EWS critical 本質上需要人工確認財務健康狀況，
-             即使 hard_constraints 機制未觸發（如降級/測試情境）也應標記；
-             與 verifiable 欄位同樣設計哲學——機器可讀，不靠解析 narrative 文字。
+    三種觸發條件（各自獨立評估，多條件時全部列出）：
 
-    多條件同時觸發時，review_reasons 完整列出所有原因（不截斷至第一個）。
+    1. overall confidence < _HITL_CONFIDENCE_THRESHOLD (0.40)
+       reason format:
+         獨立低信心：  "low_confidence:{conf:.2f}"
+         risk_override 引發："low_confidence:{conf:.2f} (caused_by:risk_override)"
+       ─ 耦合說明 ─────────────────────────────────────────────────────────
+       _HITL_CONFIDENCE_THRESHOLD (0.40) > _RISK_OVERRIDE_CONFIDENCE (0.35)：
+       任何真實觸發 risk_override 的情況，confidence 都被強制壓至 0.35，
+       必然同時觸發 condition1。兩者不是獨立事件，而是同一根因（risk_override）
+       的兩層表現。reason 字串加 "(caused_by:risk_override)" 標記，
+       讓讀者區分「真正底層信心不足」與「風控強制降級的附帶效果」。
+       ─────────────────────────────────────────────────────────────────────
+
+    2. hard_constraint_breach 或 unverifiable_constraint（各自獨立項目）
+       → reason: "hard_constraint_breach:{hc.type}"
+                 "unverifiable_constraint:{hc.type}"
+
+    3. fundamental agent 的 EWS critical（讀 metrics，獨立於 hard_constraints）
+       → reason: "ews_critical"
+       理由：EWS critical 本質需要人工確認財務健康，即使 hard_constraints
+             未觸發（降級/測試情境）也應標記；與 verifiable 同樣設計哲學。
     """
     reasons: list[str] = []
 
     # Condition 1：低信心
+    # 若 risk_override 是根因（confidence 被強制壓至 _RISK_OVERRIDE_CONFIDENCE），
+    # 在 reason 字串標記，避免與真正的底層信心不足混淆。
     if output.confidence < _HITL_CONFIDENCE_THRESHOLD:
-        reasons.append(f"low_confidence:{output.confidence:.2f}")
+        if output.risk_override and output.confidence == _RISK_OVERRIDE_CONFIDENCE:
+            reasons.append(
+                f"low_confidence:{output.confidence:.2f} (caused_by:risk_override)"
+            )
+        else:
+            reasons.append(f"low_confidence:{output.confidence:.2f}")
 
     # Condition 2a：hard constraint 已確認觸限
     for _, hc in output.hard_constraint_breaches:

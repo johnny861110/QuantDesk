@@ -1170,8 +1170,10 @@ class TestHITLGate:
         result = Supervisor().aggregate(signals)
         assert result.requires_human_review is True
         assert any(r == "hard_constraint_breach:net_delta_pct_nav" for r in result.review_reasons)
-        # risk_override 時 confidence=0.35 < 0.40 → low_confidence 也觸發
-        assert any(r.startswith("low_confidence") for r in result.review_reasons)
+        # risk_override 時 confidence 強制壓至 0.35 < 0.40，
+        # low_confidence reason 標記 "(caused_by:risk_override)" 說明根因
+        assert any("low_confidence" in r and "caused_by:risk_override" in r
+                   for r in result.review_reasons)
 
     def test_supervisor_aggregate_no_hitl_when_clean(self) -> None:
         """無 constraint、信心足夠 → requires_human_review=False。"""
