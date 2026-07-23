@@ -86,7 +86,10 @@ class SupervisorOutput:
     requires_human_review: bool = False
     review_reasons: list[str] = field(default_factory=list)
     # review_reasons 語意：
-    #   "low_confidence:{conf:.2f}"        — overall confidence 低於門檻
+    #   "low_confidence:{conf:.2f}"                          — 真正底層信心不足
+    #   "low_confidence:{conf:.2f} (caused_by:risk_override)"— 風控強制降級的附帶效果
+    #     （兩者區分說明：_HITL_CONFIDENCE_THRESHOLD > _RISK_OVERRIDE_CONFIDENCE，
+    #      故 risk_override 場景 confidence 必然低於門檻，但根因是 breach 而非信心本身）
     #   "hard_constraint_breach:{hc.type}" — 硬約束已確認觸限
     #   "unverifiable_constraint:{hc.type}"— 底層 Greeks 缺失，無法確認安全
     #   "ews_critical"                     — fundamental agent EWS critical 預警
