@@ -72,6 +72,7 @@ from adapters.macro_adapter import (
     _require_te_key,
 )
 from agents.verifier import check_narrative
+from observability.langfuse_setup import observe, update_current_span
 from schemas.agent_signal import (
     AgentSignal,
     AgentType,
@@ -590,9 +591,22 @@ class MacroAgentState(TypedDict):
     signal:          Optional[AgentSignal]
 
 
+# ─── Langfuse traced wrappers ─────────────────────────────────────────────────
+
+@observe(name="macro_agent:adapter:fetch_macro", as_type="tool")  # type: ignore[misc]
+def _lf_fetch_macro(adapter: DataSourceAdapter, **kwargs: Any) -> Any:
+    return adapter.fetch(**kwargs)
+
+
+@observe(name="macro_agent:verifier:check_narrative", as_type="tool")  # type: ignore[misc]
+def _lf_check_narrative(narrative: str, metrics: dict[str, Any]) -> list[str]:
+    return check_narrative(narrative, metrics)
+
+
 # ─── Node functions ────────────────────────────────────────────────────────────
 
 
+@observe(name="macro_agent:node_fetch")  # type: ignore[misc]
 def _node_fetch(state: MacroAgentState) -> MacroAgentState:
     """Fetch macro events from Trading Economics (or injected adapter)."""
     errors = list(state["pipeline_errors"])
@@ -610,20 +624,25 @@ def _node_fetch(state: MacroAgentState) -> MacroAgentState:
 
     countries = state["countries"] or ["united states", "taiwan"]
     try:
-        sourced = adapter.fetch(  # type: ignore[call-arg]
+        sourced = _lf_fetch_macro(  # type: ignore[call-arg]
+            adapter,
             countries=countries,
             days_back=state["days_back"],
         )
         result: MacroResult = sourced.payload
-        return {**state, "raw_events": result.events, "asof": sourced.asof}
+        new_state: MacroAgentState = {**state, "raw_events": result.events, "asof": sourced.asof}
+        update_current_span(output={"event_count": len(result.events), "errors": len(errors)})
+        return new_state
     except Exception as exc:
         errors.append(f"macro fetch failed: {exc}")
         errors.append(
             "[降級] 總經數據擷取失敗：此 signal 為降級輸出。"
         )
+        update_current_span(output={"event_count": 0, "errors": len(errors)})
         return {**state, "raw_events": [], "pipeline_errors": errors}
 
 
+@observe(name="macro_agent:node_compute")  # type: ignore[misc]
 def _node_compute(state: MacroAgentState) -> MacroAgentState:
     """Compute surprise scores for all fetched events."""
     events = state["raw_events"]
@@ -661,12 +680,15 @@ def _node_compute(state: MacroAgentState) -> MacroAgentState:
             "event_summaries":      event_summaries,
             "_details":             details,  # passed to signal node, not in final metrics
         }
+        update_current_span(output={"macro_score": computed.get("macro_score"), "computable_count": computed.get("computable_count", 0)})
         return {**state, "computed": computed}
     except Exception as exc:
         errors.append(f"macro computation failed: {exc}")
+        update_current_span(output={"macro_score": None, "computable_count": 0})
         return {**state, "computed": None, "pipeline_errors": errors}
 
 
+@observe(name="macro_agent:node_build_signal")  # type: ignore[misc]
 def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
     """Deterministically assemble AgentSignal from computed metrics."""
     symbol = state["symbol"]
@@ -698,7 +720,7 @@ def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
     narrative = _build_narrative(
         details, score, signal, hot_warning, no_events
     )
-    verifier_errors = check_narrative(narrative, {"macro_score": score})
+    verifier_errors = _lf_check_narrative(narrative, {"macro_score": score})
     if verifier_errors:
         errors.extend(verifier_errors)
 
@@ -749,6 +771,7 @@ def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
         ),
         errors=errors,
     )
+    update_current_span(output={"signal": sig.signal.value if sig else None, "confidence": sig.confidence if sig else 0})
     return {**state, "signal": sig}
 
 
@@ -775,6 +798,7 @@ def _error_signal(
 # ─── Public pipeline ──────────────────────────────────────────────────────────
 
 
+@observe(name="macro_agent:run")  # type: ignore[misc]
 def run_macro_agent(
     symbol: str = _MACRO_SYMBOL,
     market: str = _MACRO_MARKET,
@@ -797,6 +821,7 @@ def run_macro_agent(
     """
     if asof is None:
         asof = datetime.now(UTC)
+    update_current_span(input={"symbol": symbol, "market": market, "days_back": days_back})
 
     initial_state: MacroAgentState = {
         "symbol":          symbol,
@@ -811,13 +836,13 @@ def run_macro_agent(
         "signal":          None,
     }
 
-    graph = create_macro_graph()
-    final_state = graph.invoke(initial_state)
-    sig = final_state.get("signal")
+    state = _node_fetch(initial_state)
+    state = _node_compute(state)
+    state = _node_build_signal(state)
+    sig = state.get("signal")
     if sig is None:
-        return _error_signal(
-            symbol, market, asof, final_state.get("pipeline_errors", [])
-        )
+        return _error_signal(symbol, market, asof, state.get("pipeline_errors", []))
+    update_current_span(output={"signal": sig.signal.value, "confidence": sig.confidence})
     return sig  # type: ignore[return-value]
 
 

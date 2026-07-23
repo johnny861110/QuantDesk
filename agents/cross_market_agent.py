@@ -50,6 +50,7 @@ from adapters.cross_market_adapter import (
     YFinanceCrossMarketAdapter,
 )
 from agents.verifier import check_narrative
+from observability.langfuse_setup import observe, update_current_span
 from schemas.agent_signal import (
     AgentSignal,
     AgentType,
@@ -449,8 +450,21 @@ class CrossMarketAgentState(TypedDict):
     signal:          Optional[AgentSignal]
 
 
+# ─── Langfuse traced wrappers ─────────────────────────────────────────────────
+
+@observe(name="cross_market_agent:adapter:fetch_cross", as_type="tool")  # type: ignore[misc]
+def _lf_fetch_cross(adapter: DataSourceAdapter, **kwargs: Any) -> Any:
+    return adapter.fetch(**kwargs)
+
+
+@observe(name="cross_market_agent:verifier:check_narrative", as_type="tool")  # type: ignore[misc]
+def _lf_check_narrative(narrative: str, metrics: dict[str, Any]) -> list[str]:
+    return check_narrative(narrative, metrics)
+
+
 # ─── Node functions ────────────────────────────────────────────────────────────
 
+@observe(name="cross_market_agent:node_fetch")  # type: ignore[misc]
 def _node_fetch(state: CrossMarketAgentState) -> CrossMarketAgentState:
     """Fetch multi-market close data via cross_adapter."""
     errors = list(state["pipeline_errors"])
@@ -461,34 +475,42 @@ def _node_fetch(state: CrossMarketAgentState) -> CrossMarketAgentState:
     symbols = state["symbols"] if state["symbols"] else None
 
     try:
-        sourced: SourcedData = adapter.fetch(  # type: ignore[call-arg]
+        sourced: SourcedData = _lf_fetch_cross(  # type: ignore[call-arg]
+            adapter,
             symbols=symbols,
             period="6mo",
             interval="1d",
         )
         price_data: CrossMarketData = sourced.payload
+        update_current_span(output={"has_price_data": True})
         return {**state, "price_data": price_data, "asof": sourced.asof}
     except Exception as exc:
         errors.append(f"cross-market fetch failed: {exc}")
+        update_current_span(output={"has_price_data": False})
         return {**state, "price_data": None, "pipeline_errors": errors}
 
 
+@observe(name="cross_market_agent:node_compute")  # type: ignore[misc]
 def _node_compute(state: CrossMarketAgentState) -> CrossMarketAgentState:
     """Compute all cross-market metrics from price data."""
     price_data = state["price_data"]
     errors = list(state["pipeline_errors"])
     if price_data is None:
         errors.append("no price data — skipping cross-market computation")
+        update_current_span(output={"regime": None, "has_computed": False})
         return {**state, "computed": None, "pipeline_errors": errors}
 
     try:
         computed = _compute_all_metrics(price_data)
+        update_current_span(output={"regime": computed.get("regime"), "has_computed": True})
         return {**state, "computed": computed}
     except Exception as exc:
         errors.append(f"cross-market computation failed: {exc}")
+        update_current_span(output={"regime": None, "has_computed": False})
         return {**state, "computed": None, "pipeline_errors": errors}
 
 
+@observe(name="cross_market_agent:node_signal")  # type: ignore[misc]
 def _node_signal(state: CrossMarketAgentState) -> CrossMarketAgentState:
     """Assemble AgentSignal from computed metrics."""
     computed = state["computed"]
@@ -503,7 +525,7 @@ def _node_signal(state: CrossMarketAgentState) -> CrossMarketAgentState:
     signal, confidence = _determine_signal_and_confidence(computed)
 
     narrative = _build_narrative(computed, signal)
-    verifier_errors = check_narrative(narrative, computed)
+    verifier_errors = _lf_check_narrative(narrative, computed)
     if verifier_errors:
         errors.extend(verifier_errors)
 
@@ -573,6 +595,7 @@ def _node_signal(state: CrossMarketAgentState) -> CrossMarketAgentState:
         ),
         errors=errors,
     )
+    update_current_span(output={"signal": sig.signal.value, "confidence": sig.confidence})
     return {**state, "signal": sig}
 
 
@@ -597,6 +620,7 @@ def _error_signal(asof: datetime, errors: list[str]) -> AgentSignal:
 
 # ─── Full pipeline (convenience wrapper) ──────────────────────────────────────
 
+@observe(name="cross_market_agent:run")  # type: ignore[misc]
 def run_cross_market_agent(
     *,
     symbols: dict[str, str] | None = None,
@@ -618,6 +642,7 @@ def run_cross_market_agent(
 
     eff_symbols = symbols if symbols is not None else DEFAULT_SYMBOLS
     eff_asof = asof if asof is not None else datetime.now(tz=UTC)
+    update_current_span(input={"market": market})
 
     state: CrossMarketAgentState = {
         "symbols":         eff_symbols,
@@ -634,7 +659,9 @@ def run_cross_market_agent(
     state = _node_compute(state)
     state = _node_signal(state)
 
-    return state["signal"] or _error_signal(eff_asof, state["pipeline_errors"])
+    result = state["signal"] or _error_signal(eff_asof, state["pipeline_errors"])
+    update_current_span(output={"signal": result.signal.value, "confidence": result.confidence})
+    return result
 
 
 # ─── LangGraph graph ──────────────────────────────────────────────────────────
