@@ -63,7 +63,10 @@ print(f"   errors={risk_sig.errors[:1] if risk_sig.errors else []}")
 print("\n▶ Running fundamental_agent ...")
 
 from agents.fundamental_agent import FundamentalAgent  # noqa: E402
-from tests.conftest import (  # noqa: E402
+
+# _demo_fixtures lives in the same scripts/ directory; importable because Python
+# adds the script's directory to sys.path when running the script directly.
+from _demo_fixtures import (  # noqa: E402
     SQLiteStore,
     _insert_fact,
     _insert_filing,
