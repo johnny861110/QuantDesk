@@ -35,7 +35,12 @@ from schemas.agent_signal import (
     Target,
     TimeHorizon,
 )
-from supervisor.graph import SOURCE_RELIABILITY, Supervisor, _should_exclude_from_directional_vote
+from supervisor.graph import (
+    SOURCE_RELIABILITY,
+    Supervisor,
+    _compute_hitl_gate,
+    _should_exclude_from_directional_vote,
+)
 from supervisor.signal import HorizonResult, SupervisorOutput
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -986,3 +991,215 @@ class TestLayer1UnverifiableConstraints:
         result = Supervisor().aggregate(signals)
         assert result.unverifiable_constraints == []
         assert result.risk_override is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HITL Gate（Phase 6）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_supervisor_output(
+    confidence: float = 0.70,
+    breaches: list[tuple[AgentType, HardConstraint]] | None = None,
+    unverifiable: list[tuple[AgentType, HardConstraint]] | None = None,
+) -> SupervisorOutput:
+    """建構最小可用的 SupervisorOutput，只設 HITL Gate 關心的欄位。"""
+    return SupervisorOutput(
+        target=_TARGET,
+        asof=_ASOF,
+        hard_constraint_breaches=breaches or [],
+        unverifiable_constraints=unverifiable or [],
+        risk_override=bool(breaches) or bool(unverifiable),
+        mandatory_warnings=[],
+        horizon_breakdown={},
+        excluded_from_voting=[],
+        exclusion_reasons={},
+        background_context=[],
+        directional_vote_pool=[],
+        overall_recommendation=Signal.NEUTRAL,
+        confidence=confidence,
+        overall_narrative="",
+        raw_agent_signals=[],
+        disclaimer="test",
+    )
+
+
+class TestHITLGate:
+    """
+    HITL Gate 測試：三種觸發條件各自可獨立觸發，多條件同時觸發時 review_reasons
+    完整列出所有原因。
+
+    直接測試 _compute_hitl_gate() 純函數（確保 condition 隔離），
+    再透過 Supervisor().aggregate() 驗證端到端整合。
+    """
+
+    # ── 純函數單元測試 ─────────────────────────────────────────────────────
+
+    def test_no_hitl_normal_case(self) -> None:
+        """正常情況：高信心、無 constraint、無 EWS → requires_human_review=False。"""
+        output = _make_supervisor_output(confidence=0.75)
+        triggered, reasons = _compute_hitl_gate(output, [])
+        assert triggered is False
+        assert reasons == []
+
+    def test_condition1_low_confidence_independent(self) -> None:
+        """Condition 1 獨立觸發：confidence=0.25，無其他條件。"""
+        output = _make_supervisor_output(confidence=0.25)
+        triggered, reasons = _compute_hitl_gate(output, [])
+        assert triggered is True
+        assert len(reasons) == 1
+        assert reasons[0].startswith("low_confidence:")
+        assert "0.25" in reasons[0]
+
+    def test_condition1_at_exact_threshold_does_not_trigger(self) -> None:
+        """confidence == threshold 不觸發（門檻是嚴格小於）。"""
+        output = _make_supervisor_output(confidence=0.40)
+        triggered, reasons = _compute_hitl_gate(output, [])
+        assert triggered is False
+
+    def test_condition2_hard_breach_independent(self) -> None:
+        """Condition 2a 獨立觸發：hard constraint breached，confidence >= threshold。"""
+        hc = _hc("net_delta_pct_nav", current=0.50, limit=0.30, breached=True)
+        output = _make_supervisor_output(
+            confidence=0.60,
+            breaches=[(AgentType.RISK, hc)],
+        )
+        triggered, reasons = _compute_hitl_gate(output, [])
+        assert triggered is True
+        assert any(r == "hard_constraint_breach:net_delta_pct_nav" for r in reasons)
+        # confidence=0.60 >= threshold=0.40 → condition1 不觸發
+        assert not any(r.startswith("low_confidence") for r in reasons)
+
+    def test_condition2_unverifiable_independent(self) -> None:
+        """Condition 2b 獨立觸發：unverifiable constraint，confidence >= threshold。"""
+        hc = HardConstraint(
+            type="gamma_limit", current=1_200_000, limit=1_000_000,
+            breached=False, verifiable=False,
+        )
+        output = _make_supervisor_output(
+            confidence=0.60,
+            unverifiable=[(AgentType.RISK, hc)],
+        )
+        triggered, reasons = _compute_hitl_gate(output, [])
+        assert triggered is True
+        assert any(r == "unverifiable_constraint:gamma_limit" for r in reasons)
+        assert not any(r.startswith("low_confidence") for r in reasons)
+
+    def test_condition3_ews_critical_independent(self) -> None:
+        """Condition 3 獨立觸發：EWS critical in fundamental metrics，無其他條件。"""
+        fundamental_sig = _sig(
+            AgentType.FUNDAMENTAL,
+            Signal.BEARISH,
+            confidence=0.80,
+            hard_constraints=[],     # 刻意不加 HardConstraint，測試 metrics-only 路徑
+            metrics={"ews_warning_level": "critical", "ews_signal_count": 2},
+        )
+        output = _make_supervisor_output(confidence=0.70)
+        triggered, reasons = _compute_hitl_gate(output, [fundamental_sig])
+        assert triggered is True
+        assert "ews_critical" in reasons
+        assert not any(r.startswith("low_confidence") for r in reasons)
+        assert not any(r.startswith("hard_constraint_breach") for r in reasons)
+
+    def test_ews_high_does_not_trigger_condition3(self) -> None:
+        """EWS high（非 critical）不觸發 condition 3。"""
+        fundamental_sig = _sig(
+            AgentType.FUNDAMENTAL,
+            Signal.BEARISH,
+            metrics={"ews_warning_level": "high"},
+        )
+        output = _make_supervisor_output(confidence=0.70)
+        triggered, reasons = _compute_hitl_gate(output, [fundamental_sig])
+        assert triggered is False
+
+    def test_multiple_conditions_all_reasons_listed(self) -> None:
+        """多條件同時觸發：review_reasons 完整列出所有原因，不截斷。"""
+        hc_breach = _hc("net_delta_pct_nav", current=0.50, limit=0.30, breached=True)
+        hc_unver = HardConstraint(
+            type="gamma_limit", current=1_200_000, limit=1_000_000,
+            breached=False, verifiable=False,
+        )
+        fundamental_sig = _sig(
+            AgentType.FUNDAMENTAL,
+            Signal.BEARISH,
+            metrics={"ews_warning_level": "critical"},
+        )
+        output = _make_supervisor_output(
+            confidence=0.20,                                # triggers condition 1
+            breaches=[(AgentType.RISK, hc_breach)],        # triggers condition 2a
+            unverifiable=[(AgentType.RISK, hc_unver)],     # triggers condition 2b
+        )
+        triggered, reasons = _compute_hitl_gate(output, [fundamental_sig])  # condition 3
+        assert triggered is True
+        # 所有四種原因必須出現，不得只顯示第一個
+        assert any(r.startswith("low_confidence") for r in reasons)
+        assert any(r == "hard_constraint_breach:net_delta_pct_nav" for r in reasons)
+        assert any(r == "unverifiable_constraint:gamma_limit" for r in reasons)
+        assert "ews_critical" in reasons
+        assert len(reasons) == 4
+
+    def test_multiple_breaches_each_listed_separately(self) -> None:
+        """多個 hard constraint 同時觸限：每個各自出現在 review_reasons。"""
+        output = _make_supervisor_output(
+            confidence=0.60,
+            breaches=[
+                (AgentType.RISK, _hc("net_delta_pct_nav", 0.50, 0.30, True)),
+                (AgentType.RISK, _hc("vega_limit", 600_000, 500_000, True)),
+            ],
+        )
+        triggered, reasons = _compute_hitl_gate(output, [])
+        assert triggered is True
+        assert "hard_constraint_breach:net_delta_pct_nav" in reasons
+        assert "hard_constraint_breach:vega_limit" in reasons
+        assert len(reasons) == 2
+
+    # ── 端到端整合測試（透過 Supervisor.aggregate()）──────────────────────────
+
+    def test_supervisor_aggregate_sets_hitl_fields(self) -> None:
+        """aggregate() 正確設定 requires_human_review 和 review_reasons 欄位。"""
+        signals = [
+            _sig(
+                AgentType.RISK,
+                Signal.BEARISH,
+                confidence=0.80,
+                hard_constraints=[
+                    _hc("net_delta_pct_nav", current=0.50, limit=0.30, breached=True),
+                ],
+            ),
+            _sig(AgentType.FUNDAMENTAL, Signal.NEUTRAL, confidence=0.70),
+        ]
+        result = Supervisor().aggregate(signals)
+        assert result.requires_human_review is True
+        assert any(r == "hard_constraint_breach:net_delta_pct_nav" for r in result.review_reasons)
+        # risk_override 時 confidence=0.35 < 0.40 → low_confidence 也觸發
+        assert any(r.startswith("low_confidence") for r in result.review_reasons)
+
+    def test_supervisor_aggregate_no_hitl_when_clean(self) -> None:
+        """無 constraint、信心足夠 → requires_human_review=False。"""
+        signals = [
+            _sig(AgentType.FUNDAMENTAL, Signal.BULLISH, confidence=0.75),
+            _sig(AgentType.TECHNICAL, Signal.BULLISH, confidence=0.65),
+        ]
+        result = Supervisor().aggregate(signals)
+        assert result.requires_human_review is False
+        assert result.review_reasons == []
+
+    def test_narrative_contains_hitl_note_when_triggered(self) -> None:
+        """requires_human_review=True 時，overall_narrative 包含人工複核提示文字。"""
+        signals = [
+            _sig(
+                AgentType.RISK,
+                hard_constraints=[_hc("net_delta_pct_nav", 0.50, 0.30, True)],
+            ),
+        ]
+        result = Supervisor().aggregate(signals)
+        assert result.requires_human_review is True
+        assert "人工複核" in result.overall_narrative
+
+    def test_narrative_no_hitl_note_when_clean(self) -> None:
+        """requires_human_review=False 時，overall_narrative 不包含 🔴。"""
+        signals = [
+            _sig(AgentType.FUNDAMENTAL, Signal.BULLISH, confidence=0.75),
+        ]
+        result = Supervisor().aggregate(signals)
+        assert result.requires_human_review is False
+        assert "🔴" not in result.overall_narrative

@@ -11,7 +11,7 @@ backward-compat properties（供 test_phase0 使用）：
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from schemas.agent_signal import AgentSignal, AgentType, HardConstraint, Signal, Target
@@ -81,6 +81,15 @@ class SupervisorOutput:
     overall_narrative: str
     raw_agent_signals: list[AgentSignal]
     disclaimer: str
+    # ── HITL Gate（Phase 6）──────────────────────────────────────────────────
+    # 機器可讀的人工複核標記；有 default 值，向後相容既有建構呼叫。
+    requires_human_review: bool = False
+    review_reasons: list[str] = field(default_factory=list)
+    # review_reasons 語意：
+    #   "low_confidence:{conf:.2f}"        — overall confidence 低於門檻
+    #   "hard_constraint_breach:{hc.type}" — 硬約束已確認觸限
+    #   "unverifiable_constraint:{hc.type}"— 底層 Greeks 缺失，無法確認安全
+    #   "ews_critical"                     — fundamental agent EWS critical 預警
 
     # ── Backward-compat properties for test_phase0 ──────────────────────────
 
