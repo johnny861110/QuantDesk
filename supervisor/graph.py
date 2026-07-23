@@ -22,7 +22,7 @@ MEDIUM 層空層處理（Phase 5 設計拍板）：
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final
+from typing import Any, Final
 
 from schemas.agent_signal import AgentSignal, AgentType, HardConstraint, Signal
 from supervisor.signal import HorizonResult, SupervisorOutput
@@ -32,6 +32,7 @@ SOURCE_RELIABILITY: Final[dict[AgentType, float]] = {
     AgentType.FUNDAMENTAL: 1.0,   # 財報數字確定性最高
     AgentType.MACRO:       0.85,  # ⚠️ 暫定值；TD-MACRO-01 仍有未解決項目
     AgentType.TECHNICAL:   0.80,  # ⚠️ 暫定值
+    AgentType.CHIP:        0.75,  # ⚠️ 暫定值；籌碼面，FinMind 資料來源
     AgentType.NEWS:        0.60,  # ⚠️ 暫定值；LLM 依賴度高
     # CROSS_MARKET: 0.0 → 不參與方向性投票，不加入此 dict
     # RISK: None → 走 Layer 1，不參與方向性投票
@@ -444,4 +445,61 @@ class Supervisor:
             output, signals
         )
         output.overall_narrative = _build_narrative(output)
+        return output
+
+    def aggregate_agentic(
+        self,
+        domain_reports: "list[Any]",
+        symbol: str = "",
+        scenario: str = "single_stock",
+    ) -> SupervisorOutput:
+        """Agentic 架構入口：接受 DomainReport 列表，整合後回傳 SupervisorOutput。
+
+        架構設計（CLAUDE.md §三條不可違反）：
+          1. 規則引擎（三層仲裁）結果不被 LLM 影響
+          2. LLM Synthesis 僅替換 overall_narrative（白話說明）
+          3. risk_override=True 時跳過 LLM synthesis（硬約束已強制決定）
+
+        Parameters
+        ----------
+        domain_reports : list[DomainReport]
+            所有 domain agent 輸出的報告列表。
+        symbol         : str
+            分析標的代碼（供 Synthesis LLM 組織報告用）。
+        scenario       : str
+            場景類型："single_stock" / "portfolio_risk" / "multi_stock_scan"。
+
+        Returns
+        -------
+        SupervisorOutput
+            同 aggregate() 的輸出型別，向後相容。
+        """
+        # 延遲 import，避免 circular import
+        from schemas.domain_report import domain_report_to_agent_signal  # noqa: PLC0415
+        from supervisor.synthesis import synthesize_reports              # noqa: PLC0415
+
+        # Step 1: DomainReport → AgentSignal（橋接）
+        agent_signals = [domain_report_to_agent_signal(r) for r in domain_reports]
+
+        # Step 2: 三層規則引擎（Layer 1 硬約束 + Layer 2 時間框架 + Layer 3 信心加權）
+        output = self.aggregate(agent_signals)
+
+        # Step 3: LLM Synthesis（只替換 narrative，不改變任何規則引擎結論）
+        if output.risk_override:
+            # 硬約束已強制決定方向，跳過 LLM synthesis
+            # 規則引擎結論（signal=BEARISH, confidence=0.35）保持不變
+            output.overall_narrative = (
+                output.overall_narrative
+                + "  【Synthesis 已跳過：風控強制降級，不呼叫 LLM】"
+            )
+        else:
+            try:
+                synthesis = synthesize_reports(domain_reports, symbol=symbol, scenario=scenario)
+                if synthesis.narrative:
+                    # 只替換 narrative，其他欄位（signal, confidence, risk_override）不動
+                    output.overall_narrative = synthesis.narrative
+            except Exception:  # noqa: BLE001
+                # LLM synthesis 失敗 → 保留確定性 narrative，系統仍可用
+                pass
+
         return output
