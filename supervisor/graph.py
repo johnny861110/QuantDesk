@@ -21,6 +21,7 @@ MEDIUM 層空層處理（Phase 5 設計拍板）：
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -503,3 +504,53 @@ class Supervisor:
                 pass
 
         return output
+
+    async def aggregate_debate(
+        self,
+        domain_reports: "list[Any]",
+        symbol: str = "",
+        scenario: str = "single_stock",
+    ) -> "tuple[SupervisorOutput, Any]":
+        """Debate 架構入口：三層規則引擎 + Multi-agent Debate 並行執行。
+
+        架構（CLAUDE.md §三條不可違反）：
+          1. 規則引擎（三層仲裁）與 Debate LLM 並行執行，互不阻塞
+          2. Debate PM 裁決只替換 overall_narrative（不覆蓋規則引擎 signal/confidence）
+          3. risk_override=True 時 Debate narrative 被跳過（硬約束優先）
+
+        執行流程：
+          asyncio.gather(
+            aggregate_agentic(),   ← 三層規則引擎 + Synthesis LLM（in thread）
+            run_debate(),          ← Bull + Bear 並行 + PM 仲裁（async）
+          )
+          ↓
+          若 not risk_override → pm_verdict.thesis 取代 overall_narrative
+
+        Parameters
+        ----------
+        domain_reports : list[DomainReport]
+        symbol         : str
+        scenario       : str
+
+        Returns
+        -------
+        tuple[SupervisorOutput, DebateOutput]
+        """
+        from agents.debate_agents import run_debate  # noqa: PLC0415
+
+        # Step 1: 規則引擎 + Debate 並行
+        # asyncio.to_thread 讓同步的 aggregate_agentic 不阻塞 event loop
+        supervisor_output, debate_output = await asyncio.gather(
+            asyncio.to_thread(self.aggregate_agentic, domain_reports, symbol, scenario),
+            run_debate(domain_reports, symbol=symbol, scenario=scenario),
+        )
+
+        # Step 2: PM 裁決替換 narrative（硬約束跳過）
+        if supervisor_output.risk_override:
+            supervisor_output.overall_narrative += (
+                "  【Debate 已跳過：風控強制降級，PM 裁決不適用】"
+            )
+        elif debate_output.pm_verdict.thesis:
+            supervisor_output.overall_narrative = debate_output.pm_verdict.thesis
+
+        return supervisor_output, debate_output
