@@ -158,7 +158,7 @@ def _build_reports_context(reports: list[DomainReport], symbol: str, scenario: s
     return "\n".join(lines)
 
 
-@observe(name="synthesis:llm_call", as_type="llm")  # type: ignore[misc]
+@observe(name="synthesis:llm_call", as_type="generation")  # type: ignore[misc]
 def _call_synthesis_llm(context: str) -> dict[str, Any]:
     """
     呼叫 GPT-4o 做跨 domain 仲裁推理。
