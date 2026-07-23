@@ -41,6 +41,7 @@ from langgraph.graph import END, StateGraph
 from adapters.base import DataSourceAdapter, SourcedData
 from adapters.price_adapter import FinMindPriceAdapter, OHLCVData, YFinancePriceAdapter
 from agents.verifier import check_narrative
+from observability.langfuse_setup import observe, update_current_span
 from schemas.agent_signal import (
     AgentSignal,
     AgentType,
@@ -520,8 +521,21 @@ class TechnicalAgentState(TypedDict):
     signal: Optional[AgentSignal]
 
 
+# ─── Langfuse traced wrappers ─────────────────────────────────────────────────
+
+@observe(name="technical_agent:adapter:fetch_price", as_type="tool")  # type: ignore[misc]
+def _lf_fetch_price(adapter: DataSourceAdapter, **kwargs: Any) -> Any:
+    return adapter.fetch(**kwargs)
+
+
+@observe(name="technical_agent:verifier:check_narrative", as_type="tool")  # type: ignore[misc]
+def _lf_check_narrative(narrative: str, metrics: dict[str, Any]) -> list[str]:
+    return check_narrative(narrative, metrics)
+
+
 # ─── Node functions ────────────────────────────────────────────────────────────
 
+@observe(name="technical_agent:node_fetch")  # type: ignore[misc]
 def _node_fetch(state: TechnicalAgentState) -> TechnicalAgentState:
     """Fetch OHLCV data via price_adapter."""
     errors = list(state["pipeline_errors"])
@@ -534,7 +548,8 @@ def _node_fetch(state: TechnicalAgentState) -> TechnicalAgentState:
             adapter = YFinancePriceAdapter()
 
     try:
-        sourced: SourcedData = adapter.fetch(  # type: ignore[call-arg]
+        sourced: SourcedData = _lf_fetch_price(  # type: ignore[call-arg]
+            adapter,
             symbol=state["symbol"],
             period="6mo",
             interval="1d",
@@ -542,18 +557,23 @@ def _node_fetch(state: TechnicalAgentState) -> TechnicalAgentState:
         )
         price_data: OHLCVData = sourced.payload
         # Override asof with actual data timestamp
-        return {**state, "price_data": price_data, "asof": sourced.asof}
+        new_state: TechnicalAgentState = {**state, "price_data": price_data, "asof": sourced.asof}
+        update_current_span(output={"has_price_data": True, "errors": len(errors)})
+        return new_state
     except Exception as exc:
         errors.append(f"price fetch failed: {exc}")
+        update_current_span(output={"has_price_data": False, "errors": len(errors)})
         return {**state, "price_data": None, "pipeline_errors": errors}
 
 
+@observe(name="technical_agent:node_compute")  # type: ignore[misc]
 def _node_compute(state: TechnicalAgentState) -> TechnicalAgentState:
     """Compute all indicators from price data."""
     price_data = state["price_data"]
     errors = list(state["pipeline_errors"])
     if price_data is None:
         errors.append("no price data — skipping indicator computation")
+        update_current_span(output={"has_indicators": False, "is_consolidating": False})
         return {**state, "indicators": None, "is_consolidating": False, "pipeline_errors": errors}
 
     try:
@@ -562,12 +582,15 @@ def _node_compute(state: TechnicalAgentState) -> TechnicalAgentState:
         is_consolidating = (
             not np.isnan(bb_width_pct) and bb_width_pct < 0.04
         )
+        update_current_span(output={"has_indicators": True, "is_consolidating": is_consolidating})
         return {**state, "indicators": indicators, "is_consolidating": is_consolidating}
     except Exception as exc:
         errors.append(f"indicator computation failed: {exc}")
+        update_current_span(output={"has_indicators": False, "is_consolidating": False})
         return {**state, "indicators": None, "is_consolidating": False, "pipeline_errors": errors}
 
 
+@observe(name="technical_agent:node_signal")  # type: ignore[misc]
 def _node_signal(state: TechnicalAgentState) -> TechnicalAgentState:
     """Assemble AgentSignal from indicators."""
     indicators = state["indicators"]
@@ -590,7 +613,7 @@ def _node_signal(state: TechnicalAgentState) -> TechnicalAgentState:
     signal, confidence = _determine_signal_and_confidence(indicators, is_consolidating)
 
     narrative = _build_narrative(indicators, signal, is_consolidating)
-    verifier_errors = check_narrative(narrative, indicators)
+    verifier_errors = _lf_check_narrative(narrative, indicators)
     if verifier_errors:
         errors.extend(verifier_errors)
 
@@ -666,6 +689,7 @@ def _node_signal(state: TechnicalAgentState) -> TechnicalAgentState:
         ),
         errors=errors,
     )
+    update_current_span(output={"signal": sig.signal.value, "confidence": sig.confidence})
     return {**state, "signal": sig}
 
 
@@ -695,6 +719,7 @@ def _error_signal(
 
 # ─── Full pipeline (convenience wrapper) ──────────────────────────────────────
 
+@observe(name="technical_agent:run")  # type: ignore[misc]
 def run_technical_agent(
     *,
     symbol: str,
@@ -713,6 +738,7 @@ def run_technical_agent(
     asof          : Timestamp for provenance.  Defaults to UTC now.
     """
     eff_asof = asof if asof is not None else datetime.now(tz=UTC)
+    update_current_span(input={"symbol": symbol, "market": market})
 
     state: TechnicalAgentState = {
         "symbol":          symbol,
@@ -730,12 +756,14 @@ def run_technical_agent(
     state = _node_compute(state)
     state = _node_signal(state)
 
-    return state["signal"] or _error_signal(
+    result = state["signal"] or _error_signal(
         symbol=symbol,
         market=market,
         asof=eff_asof,
         errors=state["pipeline_errors"],
     )
+    update_current_span(output={"signal": result.signal.value, "confidence": result.confidence})
+    return result
 
 
 # ─── LangGraph graph ──────────────────────────────────────────────────────────

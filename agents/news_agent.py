@@ -71,6 +71,7 @@ from adapters.news_adapter import (
     _require_env,
 )
 from agents.verifier import check_injection, check_narrative, wrap_external_content
+from observability.langfuse_setup import observe, update_current_span
 from schemas.agent_signal import (
     AgentSignal,
     AgentType,
@@ -420,9 +421,42 @@ class NewsAgentState(TypedDict):
     signal:          Optional[AgentSignal]
 
 
+# ─── Traced wrappers (tool spans for Langfuse; transparent no-op when disabled) ─
+
+@observe(name="news_agent:adapter:fetch_mops", as_type="tool")  # type: ignore[misc]
+def _lf_fetch_mops(adapter: DataSourceAdapter, **kwargs: Any) -> Any:
+    return adapter.fetch(**kwargs)  # type: ignore[call-arg]
+
+
+@observe(name="news_agent:adapter:fetch_rss", as_type="tool")  # type: ignore[misc]
+def _lf_fetch_rss(adapter: DataSourceAdapter, **kwargs: Any) -> Any:
+    return adapter.fetch(**kwargs)  # type: ignore[call-arg]
+
+
+@observe(name="news_agent:adapter:fetch_tavily", as_type="tool")  # type: ignore[misc]
+def _lf_fetch_tavily(adapter: DataSourceAdapter, **kwargs: Any) -> Any:
+    return adapter.fetch(**kwargs)  # type: ignore[call-arg]
+
+
+@observe(name="news_agent:verifier:check_injection", as_type="tool")  # type: ignore[misc]
+def _lf_check_injection(text: str) -> list[str]:
+    return check_injection(text)
+
+
+@observe(name="news_agent:llm:call_analysis", as_type="tool")  # type: ignore[misc]
+def _lf_call_llm(items: list[NewsItem], client: Any, model: str) -> dict[str, Any]:
+    return _call_llm_analysis(items, client, model=model)
+
+
+@observe(name="news_agent:verifier:check_narrative", as_type="tool")  # type: ignore[misc]
+def _lf_check_narrative(narrative: str, metrics: dict[str, Any]) -> list[str]:
+    return check_narrative(narrative, metrics)
+
+
 # ─── Node functions ────────────────────────────────────────────────────────────
 
 
+@observe(name="news_agent:node_fetch_all")  # type: ignore[misc]
 def _node_fetch_all(state: NewsAgentState) -> NewsAgentState:
     """Fetch news from all three adapters; failures are non-fatal."""
     symbol = state["symbol"]
@@ -434,11 +468,11 @@ def _node_fetch_all(state: NewsAgentState) -> NewsAgentState:
     # ① MOPS (公開資訊觀測站)
     mops = state["mops_adapter"] or MopsNewsAdapter()
     try:
-        sourced = mops.fetch(symbol=symbol, days_back=days_back)  # type: ignore[call-arg]
+        sourced = _lf_fetch_mops(mops, symbol=symbol, days_back=days_back)
         result: NewsResult = sourced.payload
         # Injection check on official disclosures (best-effort)
         for item in result.items:
-            warnings = check_injection(item.title + " " + item.summary)
+            warnings = _lf_check_injection(item.title + " " + item.summary)
             if warnings:
                 errors.extend(warnings)
             else:
@@ -449,12 +483,10 @@ def _node_fetch_all(state: NewsAgentState) -> NewsAgentState:
     # ② RSS
     rss = state["rss_adapter"] or RSSNewsAdapter()
     try:
-        sourced_rss = rss.fetch(  # type: ignore[call-arg]
-            symbol=symbol, query_terms=terms, days_back=days_back
-        )
+        sourced_rss = _lf_fetch_rss(rss, symbol=symbol, query_terms=terms, days_back=days_back)
         rss_result: NewsResult = sourced_rss.payload
         for item in rss_result.items:
-            warnings = check_injection(item.title + " " + item.summary)
+            warnings = _lf_check_injection(item.title + " " + item.summary)
             if warnings:
                 errors.extend(warnings)
             else:
@@ -466,12 +498,10 @@ def _node_fetch_all(state: NewsAgentState) -> NewsAgentState:
     tavily = state["tavily_adapter"]
     if tavily is not None:
         try:
-            sourced_tv = tavily.fetch(  # type: ignore[call-arg]
-                symbol=symbol, query_terms=terms
-            )
+            sourced_tv = _lf_fetch_tavily(tavily, symbol=symbol, query_terms=terms)
             tv_result: NewsResult = sourced_tv.payload
             for item in tv_result.items:
-                warnings = check_injection(item.title + " " + item.summary)
+                warnings = _lf_check_injection(item.title + " " + item.summary)
                 if warnings:
                     errors.extend(warnings)
                 else:
@@ -479,23 +509,31 @@ def _node_fetch_all(state: NewsAgentState) -> NewsAgentState:
         except Exception as exc:
             errors.append(f"Tavily fetch failed: {exc}")
 
+    update_current_span(output={"raw_item_count": len(all_items), "errors": len(errors)})
     return {**state, "raw_items": all_items, "pipeline_errors": errors}
 
 
+@observe(name="news_agent:node_deduplicate")  # type: ignore[misc]
 def _node_deduplicate(state: NewsAgentState) -> NewsAgentState:
     """Deduplicate raw items across sources."""
     deduped = deduplicate_items(state["raw_items"])
     # Sort by confidence_tier (ascending = most official first), then recency
     deduped.sort(key=lambda x: (x.confidence_tier, -x.published_at.timestamp()))
+    update_current_span(output={
+        "raw_count": len(state["raw_items"]),
+        "dedup_count": len(deduped),
+    })
     return {**state, "dedup_items": deduped}
 
 
+@observe(name="news_agent:node_llm_analyse")  # type: ignore[misc]
 def _node_llm_analyse(state: NewsAgentState) -> NewsAgentState:
     """Call LLM to get per-article financial implication labels."""
     items = state["dedup_items"]
     errors = list(state["pipeline_errors"])
 
     if not items:
+        update_current_span(output={"llm_called": False, "reason": "no_items"})
         return {**state, "analysis": {"articles": [], "overall_summary": "無新聞資料"}}
 
     client = state["openai_client"]
@@ -513,6 +551,7 @@ def _node_llm_analyse(state: NewsAgentState) -> NewsAgentState:
                 "[降級] LLM 分析不可用：此 signal 為降級輸出，"
                 "非基於實際新聞內容判斷，請勿與正常分析結果同等對待。"
             )
+            update_current_span(output={"llm_called": False, "reason": "client_init_failed"})
             return {
                 **state,
                 "analysis": {
@@ -525,7 +564,7 @@ def _node_llm_analyse(state: NewsAgentState) -> NewsAgentState:
 
     try:
         model = os.environ.get("OPENAI_MODEL", _DEFAULT_LLM_MODEL)
-        analysis = _call_llm_analysis(items, client, model=model)
+        analysis = _lf_call_llm(items, client, model)
     except Exception as exc:
         errors.append(f"LLM analysis failed: {exc}")
         errors.append(
@@ -537,10 +576,17 @@ def _node_llm_analyse(state: NewsAgentState) -> NewsAgentState:
             "overall_summary": "LLM 分析失敗",
             "llm_failed": True,
         }
+        update_current_span(output={"llm_called": True, "llm_failed": True})
+        return {**state, "analysis": analysis, "pipeline_errors": errors}
 
+    update_current_span(output={
+        "llm_called": True,
+        "articles_analysed": len(analysis.get("articles", [])),
+    })
     return {**state, "analysis": analysis, "pipeline_errors": errors}
 
 
+@observe(name="news_agent:node_build_signal")  # type: ignore[misc]
 def _node_build_signal(state: NewsAgentState) -> NewsAgentState:
     """Deterministically assemble AgentSignal from analysis results."""
     symbol = state["symbol"]
@@ -580,7 +626,7 @@ def _node_build_signal(state: NewsAgentState) -> NewsAgentState:
         analysis, signal, has_official,
         dedup_count=len(dedup_items), raw_count=len(raw_items),
     )
-    verifier_errors = check_narrative(narrative, {"weighted_score": weighted_score})
+    verifier_errors = _lf_check_narrative(narrative, {"weighted_score": weighted_score})
     if verifier_errors:
         errors.extend(verifier_errors)
 
@@ -638,6 +684,7 @@ def _node_build_signal(state: NewsAgentState) -> NewsAgentState:
         ),
         errors=errors,
     )
+    update_current_span(output={"signal": sig.signal.value, "confidence": sig.confidence})
     return {**state, "signal": sig}
 
 
@@ -663,6 +710,7 @@ def _error_signal(symbol: str, market: str, asof: datetime, errors: list[str]) -
 # ─── Public pipeline ──────────────────────────────────────────────────────────
 
 
+@observe(name="news_agent:run")  # type: ignore[misc]
 def run_news_agent(
     symbol: str,
     market: str = "TW",
@@ -692,6 +740,8 @@ def run_news_agent(
     if asof is None:
         asof = datetime.now(UTC)
 
+    update_current_span(input={"symbol": symbol, "market": market, "days_back": days_back})
+
     initial_state: NewsAgentState = {
         "symbol":          symbol,
         "market":          market,
@@ -709,11 +759,15 @@ def run_news_agent(
         "signal":          None,
     }
 
-    graph = create_news_graph()
-    final_state = graph.invoke(initial_state)
-    sig = final_state.get("signal")
+    state = _node_fetch_all(initial_state)
+    state = _node_deduplicate(state)
+    state = _node_llm_analyse(state)
+    state = _node_build_signal(state)
+
+    sig = state.get("signal")
     if sig is None:
-        return _error_signal(symbol, market, asof, final_state.get("pipeline_errors", []))
+        return _error_signal(symbol, market, asof, state.get("pipeline_errors", []))
+    update_current_span(output={"signal": sig.signal.value, "confidence": sig.confidence})
     return sig  # type: ignore[return-value]
 
 

@@ -49,6 +49,7 @@ from langgraph.graph import END, StateGraph
 from adapters.base import DataSourceAdapter
 from agents.verifier import check_narrative
 from agents.risk.aggregation import AggregationResult, aggregate
+from observability.langfuse_setup import observe, update_current_span
 from agents.risk.position_loader import (
     PortfolioConfig,
     Position,
@@ -102,6 +103,23 @@ DEFAULT_SPOT_MAP: dict[str, float] = {
 }
 
 
+# ─── Langfuse traced wrappers ─────────────────────────────────────────────────
+# Thin wrappers give adapter fetches and verifier checks their own child spans
+# without modifying the underlying adapters or verifier (which are shared).
+# When Langfuse is disabled, `observe` is a no-op and these are plain pass-throughs.
+
+@observe(name="risk_agent:adapter:fetch_fx", as_type="tool")  # type: ignore[misc]
+def _lf_fetch_fx(adapter: DataSourceAdapter, pair: str) -> Any:
+    """Child span: FX adapter fetch — captures pair and rate."""
+    return adapter.fetch(pair=pair)
+
+
+@observe(name="risk_agent:verifier:check_narrative", as_type="tool")  # type: ignore[misc]
+def _lf_check_narrative(narrative: str, metrics: dict[str, Any]) -> list[str]:
+    """Child span: narrative number-safety guard."""
+    return check_narrative(narrative, metrics)
+
+
 # ─── LangGraph state ──────────────────────────────────────────────────────────
 
 class RiskAgentState(TypedDict):
@@ -125,6 +143,7 @@ class RiskAgentState(TypedDict):
 
 # ─── Node functions (each pure, testable in isolation) ────────────────────────
 
+@observe(name="risk_agent:node_load")  # type: ignore[misc]
 def _node_load(state: RiskAgentState) -> RiskAgentState:
     """Load positions.yaml → PortfolioConfig."""
     errors = list(state["pipeline_errors"])
@@ -136,23 +155,33 @@ def _node_load(state: RiskAgentState) -> RiskAgentState:
     except Exception as exc:
         errors.append(f"load_portfolio failed: {exc}")
         cfg = None
+    n_pos = len(cfg.positions) if cfg else 0
+    update_current_span(
+        output={"positions_loaded": n_pos, "load_errors": len(errors)},
+    )
     return {**state, "portfolio_cfg": cfg, "pipeline_errors": errors}
 
 
+@observe(name="risk_agent:node_fetch_fx")  # type: ignore[misc]
 def _node_fetch_fx(state: RiskAgentState) -> RiskAgentState:
     """Fetch USDTWD.  Degrades gracefully (usdtwd=None) if adapter absent."""
     adapter = state["fx_adapter"]
     errors = list(state["pipeline_errors"])
     if adapter is None:
+        update_current_span(output={"usdtwd": None, "source": "no_adapter"})
         return {**state, "usdtwd": None}
     try:
-        data = adapter.fetch(pair="USDTWD")
-        return {**state, "usdtwd": float(data.payload.rate)}
+        data = _lf_fetch_fx(adapter, pair="USDTWD")   # child span
+        rate = float(data.payload.rate)
+        update_current_span(output={"usdtwd": rate, "source": data.source})
+        return {**state, "usdtwd": rate}
     except Exception as exc:
         errors.append(f"FX fetch failed: {exc}")
+        update_current_span(output={"usdtwd": None, "error": str(exc)})
         return {**state, "usdtwd": None, "pipeline_errors": errors}
 
 
+@observe(name="risk_agent:node_price")  # type: ignore[misc]
 def _node_price(state: RiskAgentState) -> RiskAgentState:
     """
     Price all valid option legs with placeholder IV.
@@ -231,6 +260,13 @@ def _node_price(state: RiskAgentState) -> RiskAgentState:
         except Exception as exc:
             errors.append(f"[{pos_idx}] {pos.symbol}: pricing error: {exc}")
 
+    n_opt = sum(1 for p in cfg.positions if p.is_option and p.is_valid)
+    update_current_span(output={
+        "options_total": n_opt,
+        "options_priced": len(greeks_map),
+        "iv_missing_count": n_opt - len(greeks_map),
+        "price_errors": len(errors) - len(state["pipeline_errors"]),
+    })
     return {
         **state,
         "greeks_map": greeks_map,
@@ -239,10 +275,12 @@ def _node_price(state: RiskAgentState) -> RiskAgentState:
     }
 
 
+@observe(name="risk_agent:node_aggregate")  # type: ignore[misc]
 def _node_aggregate(state: RiskAgentState) -> RiskAgentState:
     """Aggregate portfolio Greeks — three-layer output + hard_constraints."""
     cfg = state["portfolio_cfg"]
     if cfg is None:
+        update_current_span(output={"skipped": True, "reason": "no_portfolio"})
         return {**state, "agg_result": None}
 
     result = aggregate(
@@ -252,14 +290,26 @@ def _node_aggregate(state: RiskAgentState) -> RiskAgentState:
         portfolio_nav = cfg.portfolio_nav,
         fx_adapter  = state["fx_adapter"],
     )
+    c = result.consolidated_twd
+    breached = [hc.type for hc in result.hard_constraints if hc.breached]
+    update_current_span(output={
+        "net_delta_pct_nav": round(c.net_delta_notional_twd / (cfg.portfolio_nav or 1), 4),
+        "net_gamma_twd": round(c.net_gamma_twd, 6),
+        "net_vega_twd": round(c.net_vega_twd, 2),
+        "hard_constraint_breaches": breached,
+        "excluded_currencies": c.excluded_currencies,
+        "agg_errors": len(result.errors),
+    })
     errors = list(state["pipeline_errors"]) + result.errors
     return {**state, "agg_result": result, "pipeline_errors": errors}
 
 
+@observe(name="risk_agent:node_scenario")  # type: ignore[misc]
 def _node_scenario(state: RiskAgentState) -> RiskAgentState:
     """Run 30-scenario stress test (index ±1%/3%/5% × IV ±10%/20%)."""
     cfg = state["portfolio_cfg"]
     if cfg is None:
+        update_current_span(output={"skipped": True, "reason": "no_portfolio"})
         return {**state, "scenario_result": None}
 
     sc = run_scenarios(
@@ -268,9 +318,17 @@ def _node_scenario(state: RiskAgentState) -> RiskAgentState:
         twd_spot_map = state["twd_spot_map"],
         days_held    = state["days_held"],
     )
+    worst = min(sc.scenarios, key=lambda r: r.agg_total_pnl)
+    update_current_span(output={
+        "scenarios_run": len(sc.scenarios),
+        "worst_pnl_twd": round(worst.agg_total_pnl, 0),
+        "worst_shock": f"index{worst.index_shock:+.0%}/IV{worst.iv_shock:+.0%}",
+        "unmapped_symbols": sc.unmapped_symbols,
+    })
     return {**state, "scenario_result": sc}
 
 
+@observe(name="risk_agent:node_signal")  # type: ignore[misc]
 def _node_signal(state: RiskAgentState) -> RiskAgentState:
     """Assemble AgentSignal from all intermediate results."""
     cfg = state["portfolio_cfg"]
@@ -454,7 +512,7 @@ def build_risk_signal(
         annotated_constraints = list(agg_result.hard_constraints)
 
     narrative = _build_narrative(metrics, annotated_constraints)
-    verifier_errors = check_narrative(narrative, metrics)
+    verifier_errors = _lf_check_narrative(narrative, metrics)   # child span
     if verifier_errors:
         all_errors.extend(verifier_errors)
 
@@ -621,6 +679,7 @@ def _error_signal(asof: datetime, errors: list[str]) -> AgentSignal:
 
 # ─── Full pipeline (convenience wrapper) ──────────────────────────────────────
 
+@observe(name="risk_agent:run")  # type: ignore[misc]
 def run_risk_agent(
     *,
     spot_map: dict[str, float] | None = None,
@@ -667,7 +726,14 @@ def run_risk_agent(
     state = _node_scenario(state)
     state = _node_signal(state)
 
-    return state["signal"] or _error_signal(eff_asof, state["pipeline_errors"])
+    sig = state["signal"] or _error_signal(eff_asof, state["pipeline_errors"])
+    update_current_span(output={
+        "signal": sig.signal.value,
+        "confidence": sig.confidence,
+        "risk_override": any(hc.breached for hc in sig.hard_constraints),
+        "pipeline_errors": len(state["pipeline_errors"]),
+    })
+    return sig
 
 
 # ─── LangGraph graph ──────────────────────────────────────────────────────────
