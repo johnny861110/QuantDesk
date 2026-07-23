@@ -2323,6 +2323,7 @@ name = "quantdesk"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "feedparser" },
     { name = "financial-agent" },
     { name = "financial-reports" },
@@ -2338,7 +2339,9 @@ dependencies = [
     { name = "requests" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "streamlit" },
     { name = "tavily-python" },
+    { name = "uvicorn", extra = ["standard"] },
     { name = "yfinance" },
 ]
 
@@ -2352,6 +2355,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.139.2" },
     { name = "feedparser", specifier = ">=6.0.12" },
     { name = "financial-agent", editable = "../Financial_Agent" },
     { name = "financial-reports", editable = "../FinancialReports" },
@@ -2365,7 +2369,9 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "scipy", specifier = ">=1.17.1" },
+    { name = "streamlit", specifier = ">=1.59.2" },
     { name = "tavily-python", specifier = ">=0.7.26" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },
     { name = "yfinance", specifier = ">=1.5.1" },
 ]
 

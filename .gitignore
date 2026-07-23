@@ -7,3 +7,4 @@ __pycache__/
 .env
 *.db
 # uv.lock 應進版控（確保團隊/CI 依賴一致），故不忽略
+dashboard/node_modules/
