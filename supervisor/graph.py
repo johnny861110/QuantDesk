@@ -46,6 +46,14 @@ SOURCE_RELIABILITY: Final[dict[AgentType, float]] = {
 #     目前先用單一暫定值。
 _RISK_OVERRIDE_CONFIDENCE: Final[float] = 0.35
 
+# ⚠️ 暫定值：HITL Gate 信心門檻，未經統計校準。
+# 設計理由：低信心輸出不應被當作可執行建議，需人工確認底層假設是否成立。
+# 典型觸發：底層來源稀少、資料覆蓋不足，導致 evidence_confidence 偏低。
+# 注意：risk_override 時 confidence 被強制壓縮至 _RISK_OVERRIDE_CONFIDENCE(=0.35)，
+#       低於此門檻，故 risk_override 場景 condition1 與 condition2 均會觸發，
+#       review_reasons 完整列出兩者（符合多條件並列設計）。
+_HITL_CONFIDENCE_THRESHOLD: Final[float] = 0.40
+
 # 優先序：決定 overall_recommendation 從哪個 horizon 取
 _HORIZON_PRIORITY: Final[list[str]] = ["long", "medium", "short", "intraday"]
 
@@ -191,10 +199,55 @@ def _compute_horizon_result(
     )
 
 
+def _compute_hitl_gate(
+    output: SupervisorOutput,
+    signals: list[AgentSignal],
+) -> tuple[bool, list[str]]:
+    """
+    HITL Gate 機器可讀觸發判斷（不解析 narrative 文字）。
+
+    三種獨立觸發條件：
+    1. overall confidence < _HITL_CONFIDENCE_THRESHOLD
+       → reason: "low_confidence:{conf:.2f}"
+    2. hard_constraint_breach 或 unverifiable_constraint（各自獨立項目）
+       → reason: "hard_constraint_breach:{hc.type}" 或
+                 "unverifiable_constraint:{hc.type}"
+    3. fundamental agent 的 EWS critical（直接讀 metrics，獨立於 hard_constraints）
+       → reason: "ews_critical"
+       理由：EWS critical 本質上需要人工確認財務健康狀況，
+             即使 hard_constraints 機制未觸發（如降級/測試情境）也應標記；
+             與 verifiable 欄位同樣設計哲學——機器可讀，不靠解析 narrative 文字。
+
+    多條件同時觸發時，review_reasons 完整列出所有原因（不截斷至第一個）。
+    """
+    reasons: list[str] = []
+
+    # Condition 1：低信心
+    if output.confidence < _HITL_CONFIDENCE_THRESHOLD:
+        reasons.append(f"low_confidence:{output.confidence:.2f}")
+
+    # Condition 2a：hard constraint 已確認觸限
+    for _, hc in output.hard_constraint_breaches:
+        reasons.append(f"hard_constraint_breach:{hc.type}")
+
+    # Condition 2b：unverifiable constraint（底層 Greeks 缺失，無法確認安全）
+    for _, hc in output.unverifiable_constraints:
+        reasons.append(f"unverifiable_constraint:{hc.type}")
+
+    # Condition 3：EWS critical（讀 fundamental agent metrics，獨立於 hard_constraints）
+    for sig in signals:
+        if sig.agent == AgentType.FUNDAMENTAL:
+            if sig.metrics.get("ews_warning_level") == "critical":
+                reasons.append("ews_critical")
+
+    return bool(reasons), reasons
+
+
 def _build_narrative(output: SupervisorOutput) -> str:
     """確定性規則化 narrative（不呼叫 LLM）。數字全來自 output 結構化欄位。
 
     格式：
+      🔴 需要人工複核（若 requires_human_review，最高優先顯示）
       ⚠️ 風控強制降級（若 risk_override）
       【short】 direction（加權信心 x.xx）
       【medium】...
@@ -203,6 +256,11 @@ def _build_narrative(output: SupervisorOutput) -> str:
       【排除投票】[agent_names]
     """
     parts: list[str] = []
+
+    # HITL Gate 通知（最高優先，人工複核提示給人看，機器判斷只看欄位不解析這段文字）
+    if output.requires_human_review:
+        reasons_text = "；".join(output.review_reasons)
+        parts.append(f"🔴 需要人工複核，觸發原因：{reasons_text}")
 
     if output.hard_constraint_breaches:
         parts.append("⚠️ 風控強制降級：")
@@ -361,6 +419,13 @@ class Supervisor:
                 "非自動下單或保證獲利建議，"
                 "實際投資決策需自行判斷並承擔風險"
             ),
+            # requires_human_review / review_reasons: filled below by HITL gate
+        )
+
+        # ── HITL Gate（Phase 6）──────────────────────────────────────────────
+        # 必須在 narrative 之前計算，使 _build_narrative 能讀到 HITL 欄位
+        output.requires_human_review, output.review_reasons = _compute_hitl_gate(
+            output, signals
         )
         output.overall_narrative = _build_narrative(output)
         return output
