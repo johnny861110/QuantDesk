@@ -2,7 +2,7 @@
 QuantDesk Agentic Pipeline Demo
 
 展示重構後的真正 Agentic 架構：
-  Router LLM → Domain Agents（含真實 FinMind 資料）→ Synthesis LLM → 最終報告
+  Router LLM → Domain Agents（含真實 FinMind 資料）→ Supervisor.aggregate_agentic() → 最終報告
 
 三個情境：
   1. 單標的分析：「2330 現在怎樣」
@@ -158,36 +158,44 @@ def run_scenario_1(query: str = "2330 現在怎樣") -> None:
     except Exception as exc:
         print(f"  ⚠ Macro Agent 失敗：{exc}")
 
-    # Step 5: Synthesis LLM
-    _divider("Step 5: Synthesis LLM（GPT-4o 跨 domain 仲裁）")
+    # Step 5: Supervisor.aggregate_agentic()
+    _divider("Step 5: Supervisor.aggregate_agentic()（三層規則引擎 + GPT-4o Synthesis）")
     reports = [r for r in [technical_report, chip_report, macro_report] if r is not None]
     try:
-        from supervisor.synthesis import synthesize_reports
-        synthesis = synthesize_reports(reports=reports, symbol=symbol, scenario="single_stock")
-        print(f"  最終訊號：{synthesis.signal.value.upper()}")
-        print(f"  信心：{synthesis.confidence:.0%}")
-        print(f"  方法：{'GPT-4o' if synthesis.method == 'llm' else '確定性 fallback'}")
-        if synthesis.key_drivers:
-            print("  核心根據：")
-            for d in synthesis.key_drivers:
-                print(f"    • {d}")
-        if synthesis.key_risks:
-            print("  主要風險：")
-            for r in synthesis.key_risks:
-                print(f"    ⚠ {r}")
-        if synthesis.conflicts:
-            print("  訊號矛盾：")
-            for c in synthesis.conflicts:
-                print(f"    ↕ {c}")
+        from supervisor.graph import Supervisor
+        supervisor = Supervisor()
+        output = supervisor.aggregate_agentic(
+            domain_reports=reports,
+            symbol=symbol,
+            scenario="single_stock",
+        )
+        print(f"  最終訊號：{output.overall_recommendation.value.upper()}")
+        print(f"  信心：{output.confidence:.0%}")
+        print(f"  風控強制降級：{'是' if output.risk_override else '否'}")
+        print(f"  需人工複核：{'是' if output.requires_human_review else '否'}")
+        if output.mandatory_warnings:
+            print("  強制警告：")
+            for w in output.mandatory_warnings:
+                print(f"    ⚠ {w}")
+        if output.review_reasons:
+            print("  複核原因：")
+            for r in output.review_reasons:
+                print(f"    → {r}")
+        if output.horizon_breakdown:
+            print("  時間框架分層：")
+            for horizon, result in output.horizon_breakdown.items():
+                agents = [a.value for a, _, _ in result.contributing_agents]
+                print(f"    [{horizon}] {result.direction.value.upper()} "
+                      f"信心={result.evidence_confidence:.0%} "
+                      f"agents={agents}")
         _divider("最終報告")
-        if synthesis.narrative:
-            print(_wrap(synthesis.narrative))
+        if output.overall_narrative:
+            print(_wrap(output.overall_narrative))
         else:
-            print("  （無 LLM 摘要）")
+            print("  （無摘要）")
     except Exception as exc:
-        print(f"  ⚠ Synthesis 失敗：{exc}")
+        print(f"  ⚠ Supervisor 失敗：{exc}")
         if reports:
-            # 簡單 fallback 報告
             signals = [r.signal.value for r in reports]
             print(f"  Domain signals: {dict(zip(['technical', 'chip', 'macro'], signals))}")
 
