@@ -1,194 +1,363 @@
-# QuantDesk 起手包 — 操作指南
+# QuantDesk — 多智能體量化研究桌系統
 
-這是可以直接 clone 下去、開 Claude Code 平行開發的 repo 起手包。照以下流程走。
+> 六個獨立 domain agent（風控 / 技術面 / 財報 / 新聞 / 總經 / 跨市場），由三層仲裁 Supervisor 匯總，產出帶 **硬約束強制** 與 **人工複核標記** 的綜合投資評估。
 
-## 這個起手包裡有什麼
+---
+
+## 系統架構
 
 ```
-CLAUDE.md                    ← Claude Code 每次 session 都會讀的「憲法」（三條鐵則+架構）
-docs/
-  spec.md                    ← 完整系統規格（放進來給 agent 查，不貼進對話）
-  rag_spec.md                ← 財報 RAG 詳細設計（chunking/檢索/評估）
-  tasks/phase_0.md ~ 6.md    ← 每個 Phase 的獨立任務描述 + 完成標準
-schemas/agent_signal.py      ← 六個 agent 的共同合約（骨架已寫好）
-adapters/base.py             ← 資料源抽象基類（骨架已寫好）
-supervisor/graph.py          ← Supervisor 骨架（Phase 0 stub）
-tests/test_phase0.py         ← Phase 0 驗證測試
-.claude/agents/*.md          ← 預設的 subagent 定義（risk/technical/data 工程師）
+                    ┌────────────────────────────────────────┐
+                    │           Supervisor（三層仲裁）          │
+                    │  Layer 1: 硬約束掃描（breach → 強制降級）  │
+                    │  Layer 2: Horizon Breakdown（時間框架分層）│
+                    │  Layer 3: 信心加權投票（SOURCE_RELIABILITY）│
+                    │  HITL Gate: 機器可讀人工複核標記           │
+                    └──────────────────┬─────────────────────┘
+                                       │  AgentSignal（標準 Schema）
+      ┌────────┬──────────┬────────────┼────────────┬──────────┐
+      ▼        ▼          ▼            ▼            ▼          ▼
+   Risk     Technical  Fundamental  News         Macro    CrossMarket
+  Greeks   RSI/MACD/   XBRL財報     MOPS/RSS/   NFP/CPI  TAIEX↔S&P
+  風控      KD/布林     EWS預警      LLM分析     總經事件   滾動相關
 ```
 
-## 開發前置（用 uv 管理）
+每個 agent 都接受 mock adapter 注入，可獨立使用，也可透過 `Supervisor.aggregate()` 匯總。
 
-本專案全程用 [uv](https://docs.astral.sh/uv/) 管理 Python 版本、虛擬環境與依賴。
+---
+
+## 功能概覽
+
+### 六個 Domain Agent
+
+| Agent | 核心分析 | 資料源 | 硬約束 |
+|-------|----------|--------|--------|
+| **Risk** | Black-Scholes Greeks、Portfolio Aggregation、Scenario P&L | `positions.yaml` + YFinance FX | `net_delta_pct_nav`、`vega_usd` 等曝險上限 |
+| **Technical** | Wilder RSI、Slow KD、SMA/MACD、布林通道 | OHLCV adapter | — |
+| **Fundamental** | 財報比率（毛利率/ROE/流動比）、EWS critical/high、盈餘品質 | FinancialReports SQLiteStore | EWS critical → hard_constraint |
+| **News** | MOPS 重訊、財經 RSS、Tavily 搜尋、LLM 情感分析（含降級） | 三層 adapter + OpenAI | — |
+| **Macro** | NFP/CPI surprise-vs-consensus 計算、事件分類 | TradingEconomics adapter | — |
+| **CrossMarket** | TAIEX↔S&P 500 滾動相關係數、beta、市場 regime | YFinance 跨市場 adapter | — |（背景指標，不參與方向投票） |
+
+### Supervisor 三層仲裁
+
+1. **Layer 1 — 硬約束掃描**：任何 `hard_constraints[].breached == true` → `risk_override=True`，最終建議強制降級至 bearish，信心壓縮至 0.35。規則引擎執行，LLM 不得自由裁量。
+2. **Layer 2 — Horizon Breakdown**：依時間框架（short/medium/long）分組，計算 `consensus_share`（方向一致度）與 `evidence_confidence`（底層信心 = Σ(conf×compl×rel)/Σ(rel)，completeness 在分子不在分母，避免自我抵銷）。
+3. **Layer 3 — 信心加權投票**：依 `SOURCE_RELIABILITY`（fundamental=1.0、macro=0.85、technical=0.80、news=0.60）加權，cross_market 為背景指標不參與投票，risk 走 Layer 1 不參與方向投票。
+
+### HITL Gate（人工複核標記）
+
+機器可讀，不解析 narrative 文字（同 `verifiable=False` 設計哲學）：
+
+```python
+output.requires_human_review  # bool
+output.review_reasons         # list[str]
+# 範例：
+# "low_confidence:0.35 (caused_by:risk_override)"  ← 根因是 breach，非獨立低信心
+# "hard_constraint_breach:net_delta_pct_nav"
+# "unverifiable_constraint:vega_usd"
+# "ews_critical"
+```
+
+---
+
+## 快速開始
+
+### 前置需求
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)（套件管理器，本專案全程使用 uv）
+- （選填）FinancialReports、Financial_Agent 兩個 sibling repo（財報 agent 依賴）
+
+### 安裝
 
 ```bash
-# 安裝 uv（若尚未安裝）
-curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS/Linux
-
+git clone <repo-url>
 cd quantdesk-starter
-uv sync                    # 一鍵：建 .venv + 裝 dependencies + dev group + 產生 uv.lock
-uv run pytest -q           # 確認 Phase 0 骨架測試能過（4 passed）
+uv sync   # 建 .venv + 裝所有依賴 + 鎖定 uv.lock
 ```
 
-`uv sync` 會依 `pyproject.toml` 建立環境並鎖定到 `uv.lock`（進版控，確保團隊/CI 一致）。
-之後所有指令都用 `uv run <cmd>` 執行，不需手動 activate 虛擬環境。
-
-**常用 uv 指令**
-```bash
-uv add <package>              # 加一般依賴（自動更新 pyproject.toml + uv.lock）
-uv add --dev <package>        # 加開發依賴（進 dev group）
-uv run pytest -q              # 跑測試
-uv run ruff check .           # lint
-uv run mypy .                 # 型別檢查
-uv lock                       # 只重新鎖定不安裝
-uv export --format requirements-txt > requirements.txt  # 匯出給不支援 uv 的環境
-```
-
-## 核心流程：先序列立骨架，再平行長肌肉
-
-### 第 1 步 — Phase 0（序列，不可平行，最需要你 review）
-開 Claude Code，第一句這樣說：
-
-> 讀 CLAUDE.md 和 docs/spec.md，然後只做 docs/tasks/phase_0.md。
-> 完成後停下讓我 review，不要往下做。
-
-Phase 0 的骨架起手包已附大部分，這步主要是補 requirements/pyproject 並確認 schema
-符合你的需求。**schema 一旦鎖定，後面平行才不會打架。**
-
-### 第 2 步 — Phase 1（序列，財報 domain，投報率最高）
-schema 鎖定後：
-
-> 現在做 docs/tasks/phase_1.md，把我的 FinancialReports 和 Financial_Agent
-> 兩個 repo 接進來當財報 domain agent。完成後停下。
-
-（先把你兩個現有 repo 放進來，或給 Claude Code 存取路徑。）
-
-### 第 3 步 — Phase 2-4（此時才開平行）
-schema 已鎖定、財報 domain 已驗證，現在可以平行實作其他 agent。這樣說：
-
-> 用 subagent 平行實作以下三個任務，每個都嚴格遵守 schemas/agent_signal.py，
-> 不得修改共同 schema：
-> 1. risk-engineer 做 docs/tasks/phase_2.md（Greeks 風控）
-> 2. technical-engineer 做 docs/tasks/phase_3.md（技術面+跨市場）
-> 3. data-engineer 做 docs/tasks/phase_4.md（新聞+總經）
-> 各自完成後跑 pytest，回報結果。
-
-**必須明確講「用 subagent 平行」**，否則 Claude Code 可能依序處理。
-
-### 第 4 步 — Phase 5（序列，Supervisor 仲裁）
-六個 agent 都能獨立運作後：
-
-> 做 docs/tasks/phase_5.md，把 Supervisor 從 stub 升級成三層仲裁。
-> 特別測試：技術面看多 + 風控觸限 → 最終建議必須降級。
-
-### 第 5 步 — Phase 6（Production 硬化）
-
-## Git / 版控工作流程
-
-### 第 0 步：先建 GitHub repo，再開始開發
-建議在跑任何 Claude Code 指令之前就先建好 repo——這樣每個 Phase 完成都能直接
-commit/push，你會有完整的開發軌跡（面試時可以直接秀 commit history，證明你是
-一步步用工程紀律做出來的，不是一次生成）。
+### 驗收三關
 
 ```bash
-# 1. GitHub 上建一個空 repo（不要勾 README/gitignore/license，我們自己有）
-# 2. 本地初始化並推上去
-cd quantdesk-starter
-git init
-git add .
-git commit -m "chore: scaffold — CLAUDE.md, schema, adapter base, phase docs, CI"
-git branch -M main
-git remote add origin <你的 repo URL>
-git push -u origin main
+uv run ruff check .    # lint — 零 error 零 warning
+uv run mypy .          # 型別檢查 — zero issues
+uv run pytest -q       # 所有測試全過（696 tests）
 ```
 
-**建議在 GitHub repo 設定裡開 Branch protection rule**（Settings → Branches）：
-`main` 要求 PR + CI 通過才能合併。這一步很重要——它讓「每個 Phase 結束一定有可驗證
-產出」這條 CLAUDE.md 鐵則變成真正的技術強制，而不只是寫給 agent 看的建議。
+### 執行端對端 Demo
 
-### 分支策略：對應 Phase 的 branch，schema 鎖定點打 tag
-
-```
-main ──●(Phase 0 骨架 merge)──tag: v0.1-schema-locked
-         │
-         ├──●(Phase 1 merge, branch: phase-1-fundamental)
-         │
-         ├──●(Phase 2 merge, branch: phase-2-risk-greeks)      ┐
-         ├──●(Phase 3 merge, branch: phase-3-technical-...)    ├─ 從 tag 分出，
-         ├──●(Phase 4 merge, branch: phase-4-news-macro)       ┘  可平行、互不衝突
-         │
-         ├──●(Phase 5 merge, branch: phase-5-supervisor)
-         └──●(Phase 6 merge, branch: phase-6-hardening)
-```
-
-**為什麼 Phase 2-4 平行不會衝突**：三個 branch 各自只碰自己的檔案
-（`agents/risk_agent.py` vs `agents/technical_agent.py` vs `agents/news_agent.py`
-等），只要沒人動 `schemas/agent_signal.py` 或 `supervisor/graph.py`（CLAUDE.md
-已經禁止），三條 branch 合併回 main 時就是乾淨的、不會有 merge conflict。這也是
-「先鎖 schema 再平行」在版控層面的具體體現——schema 就是分工的邊界線。
-
-Phase 0 完成、schema 定案後打個 tag：
 ```bash
-git tag v0.1-schema-locked
-git push origin v0.1-schema-locked
+uv run python scripts/demo_full_pipeline.py
 ```
-之後開 Phase 2-4 的三條平行 branch 都從這個 tag 分出去：
+
+六個 agent 依序執行（全部使用 mock adapter，無需真實市場 API），輸出完整仲裁報告：
+
+```
+════════════════════════════════════════════════════════════════════
+  QuantDesk — Full Pipeline Demo（六 Agent + Supervisor）
+  Symbol  : 2330.TW  台積電
+════════════════════════════════════════════════════════════════════
+
+Step 1 — Risk Agent（positions.yaml + MockFX USDTWD=31.50）
+  agent      : risk
+  signal     : bearish   confidence=1.00  horizon=short
+  constraints: ⛔ BREACH: net_delta_pct_nav
+
+...（六個 agent 依序輸出）...
+
+Supervisor Layer 1 — 硬約束掃描
+  ⛔ BREACH [risk] net_delta_pct_nav  current=-2.10  limit=0.3
+  risk_override: True
+
+Supervisor Layer 2 — Horizon Breakdown
+  Horizon     Direction    consensus_share   evidence_conf
+  short       bullish              100.00%            0.50
+  medium      bullish              100.00%            0.70
+
+HITL Gate
+  requires_human_review : True
+  review_reasons: ["low_confidence:0.35 (caused_by:risk_override)",
+                   "hard_constraint_breach:net_delta_pct_nav"]
+
+最終 SupervisorOutput
+  overall_recommendation : bearish
+  confidence             : 0.35
+  disclaimer: 本系統輸出為研究輔助與風險提示，非自動下單...
+```
+
+---
+
+## 專案結構
+
+```
+quantdesk-starter/
+├── schemas/
+│   └── agent_signal.py         # 六個 agent 的共同合約（AgentSignal、HardConstraint…）
+├── adapters/
+│   ├── base.py                 # DataSourceAdapter 抽象基類（SourcedData 統一回傳格式）
+│   ├── fx_adapter.py           # USDTWD（YFinance）
+│   ├── price_adapter.py        # OHLCV（YFinance）
+│   ├── fundamental_adapter.py  # FinancialReports SQLiteStore → FinancialSnapshotWithMeta
+│   ├── news_adapter.py         # MOPS / RSS / Tavily（三層，信心分級）
+│   ├── macro_adapter.py        # TradingEconomics API
+│   ├── cross_market_adapter.py # 跨市場 OHLCV（多 symbol）
+│   └── options_adapter.py      # FinMind 選擇權（IV 取得）
+├── agents/
+│   ├── risk/                   # Greeks 計算引擎（BS + Binomial + Aggregation + Scenario）
+│   ├── risk_agent.py           # Risk domain agent（LangGraph node pipeline）
+│   ├── technical_agent.py      # Technical domain agent
+│   ├── fundamental_agent.py    # Fundamental domain agent
+│   ├── news_agent.py           # News domain agent
+│   ├── macro_agent.py          # Macro domain agent
+│   ├── cross_market_agent.py   # Cross-market domain agent
+│   └── verifier.py             # Narrative Verifier（數字洩漏 + prompt injection 防護）
+├── supervisor/
+│   ├── graph.py                # Supervisor 三層仲裁 + HITL Gate
+│   └── signal.py               # SupervisorOutput dataclass
+├── observability/
+│   └── langfuse_setup.py       # Langfuse optional tracing（LANGFUSE_ENABLED=true 啟用）
+├── config/
+│   └── positions.yaml          # 持倉設定（風控 agent 輸入）
+├── scripts/
+│   ├── demo_full_pipeline.py   # 端對端六 agent + Supervisor demo（本文件）
+│   ├── demo_langfuse_smoke.py  # Langfuse trace 驗煙測試（六 agent trace 確認）
+│   ├── verify_phase2_aggregation.py  # Greeks aggregation 端對端驗證
+│   └── _demo_fixtures.py       # SQLiteStore helper（demo scripts 共用，非 pytest 依賴）
+├── tests/
+│   ├── conftest.py             # Pytest fixtures（SQLiteStore with 2330/3711/2454 真實數據）
+│   ├── test_phase0.py          # Schema + Supervisor 骨架
+│   ├── test_phase1c.py         # Fundamental agent + Verifier
+│   ├── test_phase2_*.py        # Greeks + Aggregation + Scenario + Risk agent
+│   ├── test_phase3_*.py        # Technical + CrossMarket agent
+│   ├── test_phase4_*.py        # News + Macro agent
+│   └── test_phase5_supervisor.py  # Supervisor 三層仲裁 + HITL Gate（91 tests）
+├── docs/
+│   ├── spec.md                 # 系統設計規格（完整版）
+│   └── tasks/phase_0~6.md     # 各 Phase 任務描述與完成標準
+├── CLAUDE.md                   # 開發守則（三條不可違反的設計原則）
+└── pyproject.toml              # uv 套件管理（Python 3.11+）
+```
+
+---
+
+## 核心設計原則
+
+### 1. 確定性計算與 LLM 嚴格分離
+
+Greeks、財務指標、技術指標、統計量一律由確定性 Python 計算。LLM 只負責寫白話說明，**永遠不產出數字**。`agents/verifier.py` 的 Verifier 會掃描 narrative 中的數字洩漏。
+
+### 2. 風控是硬約束，不是投票的一票
+
+`hard_constraints[].breached == true` → Supervisor Layer 1 強制降級，不能被其他 agent 的樂觀訊號投票蓋過。規則引擎執行。
+
+### 3. 每個判斷都要帶來源與時間戳
+
+所有 `key_evidence` 都必須有 `source` 與 `asof`。`data_quality` 欄位記錄 `completeness`、`confidence`、`staleness_sec`，Supervisor 用這些計算 `evidence_confidence`。
+
+---
+
+## Observability（Langfuse Tracing）
+
+六個 agent 全部支援 Langfuse trace。每個 agent 的 `run()` 為一個頂層 span，adapter fetch / LLM call / verifier 為子 span。
+
 ```bash
-git checkout -b phase-2-risk-greeks v0.1-schema-locked
-git checkout -b phase-3-technical-crossmarket v0.1-schema-locked
-git checkout -b phase-4-news-macro v0.1-schema-locked
+# .env
+LANGFUSE_ENABLED=true
+LANGFUSE_PUBLIC_KEY=pk-...
+LANGFUSE_SECRET_KEY=sk-...
+LANGFUSE_HOST=https://cloud.langfuse.com
+
+uv run python scripts/demo_langfuse_smoke.py   # 驗證六個 agent trace 可見
 ```
 
-### 每個 Phase 的標準流程
+OTel context 透過直接 node 呼叫（非 `graph.invoke()`）傳遞，確保子 span 正確掛在父 span 下。
+
+---
+
+## 持倉設定（Risk Agent 輸入）
+
+編輯 `config/positions.yaml`，支援現貨、期貨（台指期 TXFF）、選擇權（TXO / 美股個股 options）：
+
+```yaml
+portfolio_nav:
+  value: 5000000.0
+  currency: TWD
+
+positions:
+  - symbol: 2330.TW
+    instrument_type: stock
+    quantity: -1000        # 負 = 空頭
+    currency: TWD
+    multiplier: 1
+
+  - symbol: TXO
+    instrument_type: option
+    quantity: -5
+    currency: TWD
+    multiplier: 50
+    strike: 22000
+    expiry: 2026-09-17     # 第三週三結算
+    option_type: call
+    style: european
+```
+
+---
+
+## 環境變數
+
+| 變數 | 用途 | 必填 |
+|------|------|------|
+| `LANGFUSE_ENABLED` | `true` 啟用 Langfuse tracing | 否 |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse public key | Langfuse 啟用時 |
+| `LANGFUSE_SECRET_KEY` | Langfuse secret key | Langfuse 啟用時 |
+| `LANGFUSE_HOST` | Langfuse 端點 | Langfuse 啟用時 |
+| `OPENAI_API_KEY` | News agent LLM 分析 | 否（缺席時走降級路徑） |
+| `TE_API_KEY` | TradingEconomics（Macro agent） | 否（缺席時走降級路徑） |
+| `TAVILY_API_KEY` | Tavily 搜尋（News agent） | 否（缺席時略過） |
+
+---
+
+## 測試結構
+
 ```bash
-git checkout -b phase-N-xxx v0.1-schema-locked   # 或從 main 分（依賴前面 phase 時）
-# ... Claude Code / subagent 在這條 branch 上開發 ...
-uv run pytest -q                                  # 本地先過一次
-git push -u origin phase-N-xxx
-# GitHub 上開 PR → CI 跑 lint+test → 你 review → squash merge 進 main
+uv run pytest -q                          # 全部 696 tests
+uv run pytest tests/test_phase5_supervisor.py -q  # Supervisor（91 tests）
+uv run pytest -m integration              # 整合測試（需 FinancialReports editable install）
 ```
 
-### CI（已內建）
-`.github/workflows/ci.yml` 在每次 push/PR 時自動 `uv sync` + `ruff check` + `pytest`。
-這直接對應 spec 文件裡「golden set 要跑進 CI/CD，每次改動都要驗證不能迴歸」的原則
-——只是現在先從最基本的 lint+test 開始，Phase 5 之後可以把 golden set 評估也接進來。
+| 測試檔案 | 覆蓋範圍 | Tests |
+|----------|----------|-------|
+| `test_phase0.py` | Schema contract、SupervisorOutput backward-compat | ~20 |
+| `test_phase1c.py` | Fundamental agent、Verifier（數字洩漏、injection） | ~80 |
+| `test_phase2_*.py` | Greeks（BS/Binomial）、Aggregation、Scenario、Risk agent | ~180 |
+| `test_phase3_*.py` | Technical indicators、CrossMarket correlation/beta/regime | ~120 |
+| `test_phase4_*.py` | News（三層 adapter + LLM 降級）、Macro（surprise 計算） | ~180 |
+| `test_phase5_supervisor.py` | 三層仲裁 + HITL Gate（條件獨立性 + 多條件並列） | 91 |
 
-## 你現有的兩個 repo（FinancialReports / Financial_Agent）怎麼處理
+---
 
-**建議：兩個都保持獨立 repo，不要合併進 QuantDesk。** 理由：
-1. 它們各自已經是完整、可獨立展示的作品集項目，合併成 monorepo 會讓兩者的
-   commit history 混在一起，面試時反而不好單獨講清楚每個項目的技術重點。
-2. 這剛好符合 QuantDesk 架構本身的哲學——**adapter pattern**：外部系統透過
-   抽象介面被消費，不需要把程式碼吃進來變成同一個 repo。財報 domain 的
-   `FundamentalAdapter`（`docs/tasks/phase_1.md`）就是設計成呼叫
-   FinancialReports 暴露出來的介面（DB 直連或 API），而不是把它的程式碼複製過來。
+## 實作路線圖
 
-**實作上兩種接法，看你要多緊密**：
-- **鬆耦合（建議）**：FinancialReports 跑成獨立服務（FastAPI 對外開查詢端點，或至少
-  讓 QuantDesk 能直連它的 SQLite/pg），`FundamentalAdapter` 呼叫這個介面。三個 repo
-  各自獨立部署、獨立版控，QuantDesk 只依賴介面合約。
-- **緊耦合（若要直接重用 Financial_Agent 的分析函數，不想重寫）**：用
-  `git submodule add <Financial_Agent repo URL> external/financial-agent`，
-  QuantDesk 明確 pin 住某個 commit，`agents/fundamental_agent.py` 直接 import
-  submodule 裡的分析函數。缺點是 submodule 對 Claude Code 平行開發不太友善
-  （容易忘記同步、diff 難看），**只有在真的需要複用程式碼、且不打算重寫時才用**。
+| Phase | 內容 | 狀態 |
+|-------|------|------|
+| 0 | Schema 鎖定 + Supervisor 骨架 + Adapter 基類 | ✅ 完成 |
+| 1 | 財報 domain（FinancialReports + EWS + Verifier） | ✅ 完成 |
+| 2 | Greeks 風控引擎（BS + Binomial + Aggregation + Scenario） | ✅ 完成 |
+| 3 | 技術面 + 跨市場 agent | ✅ 完成 |
+| 4 | 新聞 + 總經 agent | ✅ 完成 |
+| 5 | Supervisor 三層仲裁 | ✅ 完成 |
+| 6 | Production 硬化（免責聲明 / IV fail-safe / Langfuse / HITL Gate / E2E Demo） | ✅ 完成 |
 
-兩個 repo 目前的技術債（Phase 1 提到的資料層打通、RAG 補完）可以留在各自的 repo 裡
-獨立修，QuantDesk 這邊只等它們的介面穩定後再對接，這樣三個 repo 的開發節奏互不卡住。
+---
 
+## 設計補充說明
 
+### AgentSignal Schema（六個 agent 的共同合約）
 
-1. **成本**：六個 agent 平行約 6x token 消耗。骨架階段（Phase 0-1）用主 session
-   慢慢做，平行只用在 Phase 2-4。做完大 workflow 後去 Console 看用量。
-2. **schema 是紅線**：平行時任何 subagent 想改 `schemas/agent_signal.py` 都要先停下問你。
-   這是六個 agent 對接的唯一保證。
-3. **一次一個 Phase**：Phase 沒過測試不要往下。每個 Phase 都 git commit。
-4. **它想一次改太多就拉回來**：「這個 PR 只處理 X，其他先不要動」。
-5. **subagent vs agent teams**：先用 subagents 就夠（你六個 agent 大多獨立）。
-   只有需要「邊寫邊討論協調」時才考慮開 agent teams（成本更高）。
+```python
+@dataclass
+class AgentSignal:
+    agent: AgentType          # RISK / TECHNICAL / FUNDAMENTAL / NEWS / MACRO / CROSS_MARKET
+    target: Target            # symbol + market + asof
+    signal: Signal            # BULLISH / BEARISH / NEUTRAL
+    confidence: float         # [0, 1] — per-field source confidence（非 quality_score）
+    time_horizon: TimeHorizon # SHORT / MEDIUM / LONG
+    key_evidence: list[Evidence]     # 每項必須有 source + asof
+    hard_constraints: list[HardConstraint]
+    metrics: dict[str, Any]   # 確定性計算結果（Greeks、比率、統計量）
+    narrative: str            # LLM 生成白話說明（不含數字，經 Verifier 掃描）
+    data_quality: DataQuality # completeness / confidence / staleness_sec
+```
 
-## 為什麼這樣拆
+### evidence_confidence 公式
 
-Multi-agent 系統的地基是「標準 schema + Supervisor 骨架」。如果一開始就六路平行，
-subagent 會在沒有共同 schema 的情況下各寫各的，最後輸出格式對不起來。
-先立骨架、鎖 schema、再平行，是唯一能讓 coding agent 做完大型系統而不崩的方法。
+```
+eff_weight_i = confidence_i × completeness_i × SOURCE_RELIABILITY_i
+evidence_confidence = Σ(eff_weight_i) / Σ(SOURCE_RELIABILITY_i)
+```
+
+`completeness`（= `quality_score` for fundamental）在分子，不在分母。若放分母，compl 會與分子的 `eff_weight/rel` 互消，導致低品質資料被當作高品質，這是 Phase 5 設計時明確排除的 bug。
+
+### news agent 降級路徑
+
+`OPENAI_API_KEY` 缺失或 API 失敗 → `analysis.llm_failed=True` → `data_quality.completeness=0.0` → Supervisor Layer 3 自動排除投票（completeness=0 是明確降級旗標）。整條 pipeline 不 crash，news signal 以 `confidence=0.10` 的降級輸出保留在 `raw_agent_signals` 供追溯。
+
+---
+
+## 依賴關係
+
+```
+quantdesk-starter/
+├── financial-reports    (editable, ../FinancialReports)  ← 財報 ETL + SQLiteStore
+├── financial-agent      (editable, ../Financial_Agent)   ← 財報分析工具函數
+├── langgraph            ← 所有 agent 的 graph 編排框架
+├── pydantic             ← Schema 驗證（AgentSignal、DataQuality 等）
+├── langfuse             ← 可觀測性 tracing（optional）
+├── openai               ← News agent LLM 分析（optional）
+├── yfinance             ← FX / OHLCV / 跨市場 live adapter
+├── scipy / numpy        ← Black-Scholes、滾動相關係數等數值計算
+└── feedparser           ← News agent RSS 抓取
+```
+
+---
+
+## 常用指令
+
+```bash
+# 環境
+uv sync                              # 同步依賴
+
+# 開發三關
+uv run ruff check .                  # lint
+uv run mypy .                        # 型別檢查
+uv run pytest -q                     # 測試
+
+# Demo
+uv run python scripts/demo_full_pipeline.py       # 六 agent + Supervisor
+uv run python scripts/verify_phase2_aggregation.py  # Greeks aggregation 驗證
+
+# 加依賴
+uv add <pkg>
+uv add --dev <pkg>
+```
