@@ -303,7 +303,7 @@ def _determine_chip_signal(
 # ─── LLM 摘要層 ──────────────────────────────────────────────────────────────
 
 
-@observe(name="chip_agent:llm_synthesize", as_type="llm")  # type: ignore[misc]
+@observe(name="chip_agent:llm_synthesize", as_type="generation")  # type: ignore[misc]
 def _llm_synthesize_chip(
     symbol: str,
     signal: Signal,

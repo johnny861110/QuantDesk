@@ -170,7 +170,7 @@ def _build_pm_context(
 # ─── LLM Callers（async）─────────────────────────────────────────────────────
 
 
-@observe(name="debate:bull_llm_call", as_type="llm")  # type: ignore[misc]
+@observe(name="debate:bull_llm_call", as_type="generation")  # type: ignore[misc]
 async def _call_bull_llm(context: str) -> dict[str, Any]:
     """非同步呼叫 GPT-4o 產出多方論述。"""
     from openai import AsyncOpenAI
@@ -190,7 +190,7 @@ async def _call_bull_llm(context: str) -> dict[str, Any]:
     return json.loads(content)  # type: ignore[no-any-return]
 
 
-@observe(name="debate:bear_llm_call", as_type="llm")  # type: ignore[misc]
+@observe(name="debate:bear_llm_call", as_type="generation")  # type: ignore[misc]
 async def _call_bear_llm(context: str) -> dict[str, Any]:
     """非同步呼叫 GPT-4o 產出空方論述。"""
     from openai import AsyncOpenAI
@@ -210,7 +210,7 @@ async def _call_bear_llm(context: str) -> dict[str, Any]:
     return json.loads(content)  # type: ignore[no-any-return]
 
 
-@observe(name="debate:pm_llm_call", as_type="llm")  # type: ignore[misc]
+@observe(name="debate:pm_llm_call", as_type="generation")  # type: ignore[misc]
 async def _call_pm_llm(context: str) -> dict[str, Any]:
     """非同步呼叫 GPT-4o 做 PM 最終裁決。"""
     from openai import AsyncOpenAI

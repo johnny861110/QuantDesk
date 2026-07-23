@@ -85,7 +85,7 @@ _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使
 # ─── LLM-based router ────────────────────────────────────────────────────────
 
 
-@observe(name="router:classify_intent", as_type="llm")  # type: ignore[misc]
+@observe(name="router:classify_intent", as_type="generation")  # type: ignore[misc]
 def _llm_classify(query: str) -> dict[str, Any]:
     """
     呼叫 GPT-4o-mini 做意圖分類，回傳 dict（JSON 解析後）。
