@@ -40,6 +40,7 @@ class AgentType(str, Enum):
     NEWS = "news"
     MACRO = "macro"
     CROSS_MARKET = "cross_market"
+    CHIP = "chip"               # 台股籌碼分析（三大法人、融資融券、外資持股）
 
 
 class Target(BaseModel):

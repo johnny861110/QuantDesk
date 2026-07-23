@@ -193,7 +193,8 @@ class FinMindPriceAdapter(PriceAdapter):
     """
 
     def __init__(self, api_token: str = "") -> None:
-        self._token = api_token
+        import os
+        self._token = api_token or os.environ.get("FINMIND_KEY", "")
 
     @property
     def source_name(self) -> str:  # type: ignore[override]
@@ -246,6 +247,27 @@ class FinMindPriceAdapter(PriceAdapter):
             source=self.source_name,
             asof=payload.dates[-1],
         )
+
+    def fetch_latest_price(self, symbol: str) -> float:
+        """
+        Convenience: return the most-recent closing price for *symbol*.
+
+        Used by Risk Agent to replace the hardcoded PLACEHOLDER_SPOT_MAP.
+        Fetches the last 5 trading days and returns close[-1].
+
+        Raises ValueError if no data is available.
+        """
+        stock_id = _strip_tw_suffix(symbol)
+        end_dt = date.today()
+        start_dt = end_dt - timedelta(days=10)   # 10 calendar days → ~5-7 trading days
+        rows = self._fetch_raw(stock_id, start_dt, end_dt)
+        if not rows:
+            raise ValueError(
+                f"FinMind returned no price data for {stock_id!r}. "
+                "Check that the market is not closed and the symbol is valid."
+            )
+        payload = _parse_tw_price_rows(rows, symbol)
+        return float(payload.close[-1])
 
     def _fetch_raw(
         self,
