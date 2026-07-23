@@ -7,12 +7,15 @@ interface Stage {
 }
 
 const STAGES: Stage[] = [
-  { id: 'router',    label: 'Router',    icon: '🔀' },
-  { id: 'technical', label: 'Technical', icon: '📉' },
-  { id: 'chip',      label: 'Chip',      icon: '🏦' },
-  { id: 'macro',     label: 'Macro',     icon: '🌐' },
-  { id: 'debate',    label: 'Debate',    icon: '⚔' },
-  { id: 'final',     label: 'Final',     icon: '🏁' },
+  { id: 'router',      label: 'Router',    icon: '🔀' },
+  { id: 'technical',   label: '技術面',    icon: '📉' },
+  { id: 'chip',        label: '籌碼面',    icon: '🏦' },
+  { id: 'macro',       label: '總經面',    icon: '🌐' },
+  { id: 'news',        label: '新聞面',    icon: '📰' },
+  { id: 'cross_market',label: '跨市場',   icon: '🔗' },
+  { id: 'fundamental', label: '基本面',    icon: '📋' },
+  { id: 'debate',      label: 'Debate',    icon: '⚔' },
+  { id: 'final',       label: 'Final',     icon: '🏁' },
 ]
 
 type StageStatus = 'idle' | 'active' | 'done' | 'error'
@@ -26,12 +29,12 @@ function getStageStatus(stageId: string, state: AnalysisState): StageStatus {
 
     case 'technical':
     case 'chip':
-    case 'macro': {
+    case 'macro':
+    case 'news':
+    case 'cross_market':
+    case 'fundamental': {
       const agent = state.agents[stageId]
-      if (!agent) {
-        // active if router is done and streaming
-        return state.router && state.status === 'streaming' ? 'idle' : 'idle'
-      }
+      if (!agent) return 'idle'
       return agent.loading ? 'active' : 'done'
     }
 

@@ -322,7 +322,8 @@ def _fallback_pm(
 
 
 @observe(name="debate:run_bull_agent")  # type: ignore[misc]
-async def _run_bull_agent(reports: list[DomainReport], context: str) -> DebateParty:
+async def _run_bull_agent(reports: list[DomainReport], context: str) -> tuple[DebateParty, bool]:
+    """Returns (party, used_llm)."""
     try:
         raw = await _call_bull_llm(context)
         return DebateParty(
@@ -330,13 +331,14 @@ async def _run_bull_agent(reports: list[DomainReport], context: str) -> DebatePa
             thesis=str(raw.get("thesis", "")),
             key_points=list(raw.get("key_points", [])),
             confidence=float(raw.get("confidence", 0.5)),
-        )
+        ), True
     except Exception:  # noqa: BLE001
-        return _fallback_bull(reports)
+        return _fallback_bull(reports), False
 
 
 @observe(name="debate:run_bear_agent")  # type: ignore[misc]
-async def _run_bear_agent(reports: list[DomainReport], context: str) -> DebateParty:
+async def _run_bear_agent(reports: list[DomainReport], context: str) -> tuple[DebateParty, bool]:
+    """Returns (party, used_llm)."""
     try:
         raw = await _call_bear_llm(context)
         return DebateParty(
@@ -344,9 +346,9 @@ async def _run_bear_agent(reports: list[DomainReport], context: str) -> DebatePa
             thesis=str(raw.get("thesis", "")),
             key_points=list(raw.get("key_points", [])),
             confidence=float(raw.get("confidence", 0.5)),
-        )
+        ), True
     except Exception:  # noqa: BLE001
-        return _fallback_bear(reports)
+        return _fallback_bear(reports), False
 
 
 @observe(name="debate:run_pm_agent")  # type: ignore[misc]
@@ -355,7 +357,8 @@ async def _run_pm_agent(
     bull: DebateParty,
     bear: DebateParty,
     reports_context: str,
-) -> tuple[DebateParty, Signal]:
+) -> tuple[DebateParty, Signal, bool]:
+    """Returns (pm_party, signal, used_llm)."""
     try:
         pm_context = _build_pm_context(reports_context, bull, bear)
         raw = await _call_pm_llm(pm_context)
@@ -369,9 +372,10 @@ async def _run_pm_agent(
             key_points=list(raw.get("key_points", [])),
             confidence=float(raw.get("confidence", 0.5)),
         )
-        return pm, signal
+        return pm, signal, True
     except Exception:  # noqa: BLE001
-        return _fallback_pm(reports, bull, bear)
+        pm, signal = _fallback_pm(reports, bull, bear)
+        return pm, signal, False
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -423,13 +427,15 @@ async def run_debate(
     context = _build_reports_context(reports, symbol)
 
     # Bull + Bear 並行執行
-    bull, bear = await asyncio.gather(
+    (bull, bull_llm), (bear, bear_llm) = await asyncio.gather(
         _run_bull_agent(reports, context),
         _run_bear_agent(reports, context),
     )
 
     # PM 等兩者完成後執行
-    pm, final_signal = await _run_pm_agent(reports, bull, bear, context)
+    pm, final_signal, pm_llm = await _run_pm_agent(reports, bull, bear, context)
+
+    method = "llm" if any([bull_llm, bear_llm, pm_llm]) else "fallback"
 
     output = DebateOutput(
         symbol=symbol,
@@ -439,7 +445,7 @@ async def run_debate(
         pm_verdict=pm,
         final_signal=final_signal,
         final_confidence=pm.confidence,
-        method="llm",
+        method=method,
     )
 
     update_current_span(output={
