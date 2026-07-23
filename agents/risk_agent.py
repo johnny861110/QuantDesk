@@ -47,6 +47,7 @@ from typing import Any, Final, Optional, TypedDict
 from langgraph.graph import END, StateGraph
 
 from adapters.base import DataSourceAdapter
+from adapters.price_adapter import FinMindPriceAdapter
 from agents.verifier import check_narrative
 from agents.risk.aggregation import AggregationResult, aggregate
 from observability.langfuse_setup import observe, update_current_span
@@ -102,6 +103,39 @@ DEFAULT_SPOT_MAP: dict[str, float] = {
     "TXO":   22_000.0,     # TWD — same TAIEX level for option pricing
 }
 
+# 台股代碼格式轉換（Risk Agent 內部用 symbol.TW，FinMind 用純數字）
+_TW_EQUITY_SUFFIXES = (".TW", ".TWO")
+
+def _is_tw_equity(symbol: str) -> bool:
+    """Return True if symbol looks like a Taiwan equity (e.g. "2330.TW")."""
+    return any(symbol.upper().endswith(s) for s in _TW_EQUITY_SUFFIXES)
+
+
+@observe(name="risk_agent:fetch_live_spots", as_type="tool")  # type: ignore[misc]
+def _fetch_live_spots_for_symbols(symbols: list[str]) -> dict[str, float]:
+    """
+    嘗試從 FinMind 取各台股標的最新現貨收盤價。
+
+    只處理台股（.TW / .TWO 結尾）；美股保留 DEFAULT_SPOT_MAP 硬編碼。
+    失敗的標的靜默跳過（後續 _node_price 會從 DEFAULT_SPOT_MAP 取 fallback）。
+
+    Returns dict[symbol → latest_close]（只含成功的）。
+    """
+    adapter = FinMindPriceAdapter()   # 自動讀 FINMIND_KEY
+    live: dict[str, float] = {}
+
+    for sym in symbols:
+        if not _is_tw_equity(sym):
+            continue
+        try:
+            price = adapter.fetch_latest_price(sym)
+            live[sym] = price
+            update_current_span(output={f"spot_{sym}": price})
+        except Exception as exc:
+            update_current_span(output={f"spot_{sym}_error": str(exc)[:60]})
+
+    return live
+
 
 # ─── Langfuse traced wrappers ─────────────────────────────────────────────────
 # Thin wrappers give adapter fetches and verifier checks their own child spans
@@ -142,6 +176,54 @@ class RiskAgentState(TypedDict):
 
 
 # ─── Node functions (each pure, testable in isolation) ────────────────────────
+
+
+@observe(name="risk_agent:node_fetch_live_spots")  # type: ignore[misc]
+def _node_fetch_live_spots(state: RiskAgentState) -> RiskAgentState:
+    """
+    從 FinMind 取各台股標的最新現貨收盤價，更新 spot_map。
+
+    邏輯：
+    1. 若呼叫方已提供 spot_map（非空），先保留它
+    2. 對 spot_map 中 value==0 或未出現的台股代號，嘗試從 FinMind 取最新收盤價
+    3. 失敗的標的保留 DEFAULT_SPOT_MAP 中的 placeholder（不影響管線繼續執行）
+
+    這個 node 是「盡力而為」：任何錯誤都記錄到 errors 並繼續，
+    不讓網路失敗阻斷整個風控管線。
+    """
+    current_spot_map = dict(state["spot_map"])
+    errors = list(state["pipeline_errors"])
+
+    # 找出哪些台股標的需要從 FinMind 取价
+    tw_symbols = [sym for sym in current_spot_map if _is_tw_equity(sym)]
+
+    if not tw_symbols:
+        update_current_span(output={"live_spots_fetched": 0, "reason": "no_tw_symbols"})
+        return state
+
+    try:
+        live_prices = _fetch_live_spots_for_symbols(tw_symbols)
+        updated = 0
+        for sym, price in live_prices.items():
+            if price > 0:
+                current_spot_map[sym] = price
+                updated += 1
+        if updated < len(tw_symbols):
+            missing = [s for s in tw_symbols if s not in live_prices]
+            errors.append(
+                f"[live_spots] 部分標的無法從 FinMind 取到最新價格，"
+                f"使用 placeholder：{missing}"
+            )
+        update_current_span(output={
+            "live_spots_fetched": updated,
+            "live_prices": live_prices,
+        })
+    except Exception as exc:
+        errors.append(f"[live_spots] FinMind 現貨價擷取失敗，使用 placeholder：{exc}")
+        update_current_span(output={"live_spots_fetched": 0, "error": str(exc)[:80]})
+
+    return {**state, "spot_map": current_spot_map, "pipeline_errors": errors}
+
 
 @observe(name="risk_agent:node_load")  # type: ignore[misc]
 def _node_load(state: RiskAgentState) -> RiskAgentState:
@@ -719,6 +801,7 @@ def run_risk_agent(
         "signal":          None,
     }
 
+    state = _node_fetch_live_spots(state)  # 先取真實現貨價（盡力而為）
     state = _node_load(state)
     state = _node_fetch_fx(state)
     state = _node_price(state)
@@ -751,16 +834,18 @@ def create_risk_graph() -> Any:
     """
     builder: StateGraph = StateGraph(RiskAgentState)
 
-    builder.add_node("load",      _node_load)
-    builder.add_node("fetch_fx",  _node_fetch_fx)
-    builder.add_node("price",     _node_price)
-    builder.add_node("aggregate", _node_aggregate)
-    builder.add_node("scenario",  _node_scenario)
-    builder.add_node("signal",    _node_signal)
+    builder.add_node("fetch_live_spots", _node_fetch_live_spots)
+    builder.add_node("load",             _node_load)
+    builder.add_node("fetch_fx",         _node_fetch_fx)
+    builder.add_node("price",            _node_price)
+    builder.add_node("aggregate",        _node_aggregate)
+    builder.add_node("scenario",         _node_scenario)
+    builder.add_node("signal",           _node_signal)
 
-    builder.set_entry_point("load")
-    builder.add_edge("load",      "fetch_fx")
-    builder.add_edge("fetch_fx",  "price")
+    builder.set_entry_point("fetch_live_spots")
+    builder.add_edge("fetch_live_spots", "load")
+    builder.add_edge("load",             "fetch_fx")
+    builder.add_edge("fetch_fx",         "price")
     builder.add_edge("price",     "aggregate")
     builder.add_edge("aggregate", "scenario")
     builder.add_edge("scenario",  "signal")
