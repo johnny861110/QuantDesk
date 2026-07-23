@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Any, Final, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -81,6 +81,18 @@ PLACEHOLDER_IV: float = 0.20   # 20 % annualised — used for all options
 # Directional threshold: |net_delta_pct_nav| > 1% NAV is considered directional.
 # Inside this band the portfolio is treated as effectively delta-neutral.
 DELTA_NEUTRAL_BAND_PCT: float = 0.01
+
+# ⚠️ 暫定值：IV 缺失時每單位 missing_fraction 的信心扣分係數。
+# 設計理由：
+#   - 最差情況（全部 IV 缺失，missing_fraction=1.0）扣 0.30，使 confidence
+#     從 1.0 降至 0.70，低於多數「可執行閾值」（通常 ≥ 0.80），強迫使用者先處理資料問題。
+#   - 不設為 0.30 以外的較大值，因為 Greeks 僅低估（不是完全錯誤）；
+#     placeholder IV=20% 仍有一定參考性，但需告知使用者不可全信。
+#   - 公式：conf -= _IV_MISSING_CONFIDENCE_PENALTY × missing_fraction
+#     missing_fraction = (n_options − n_priced) / n_options
+#     此為線性比例，確保「部分失敗」到「完全失敗」之間連續無跳動。
+#   - Phase 4 FinMind 接入後，若 IV 反推成功率提高，可重新校準此值。
+_IV_MISSING_CONFIDENCE_PENALTY: Final[float] = 0.30
 
 DEFAULT_SPOT_MAP: dict[str, float] = {
     "2330.TW": 850.0,      # TWD — TSMC placeholder
@@ -509,10 +521,11 @@ def _compute_confidence(
 
     −0.20                   : FX missing → USD exposure excluded from consolidated_twd
     −0.10                   : any invalid position (bad schema / expired option)
-    −0.30 × missing_fraction: proportional IV penalty
+    −_IV_MISSING_CONFIDENCE_PENALTY × missing_fraction: proportional IV penalty（⚠️ 暫定值）
                               complete failure (0 priced):   −0.30
                               partial failure (k/n priced):  −0.30 × (1 − k/n)
                               all priced:                     0
+                              連續線性：部分→完全失敗無跳動。
     Minimum: 0.10
     """
     conf = 1.0
@@ -530,12 +543,13 @@ def _compute_confidence(
             1 for idx, p in enumerate(positions)
             if p.is_option and p.is_valid and idx in greeks_map
         )
-        # Proportional deduction: missing_fraction × 0.30
-        # Complete failure (n_priced=0):  −0.30 (same as before)
-        # Partial  (e.g. 1/3 priced):    −0.30 × 2/3 ≈ −0.20
-        # All priced:                      0 (no penalty)
+        # 線性比例懲罰：missing_fraction × _IV_MISSING_CONFIDENCE_PENALTY（暫定 0.30）
+        # 單一公式覆蓋全範圍，確保部分失敗→完全失敗之間無不連續跳動：
+        #   missing_fraction=0.0 (all priced) → penalty=0.00
+        #   missing_fraction=0.5 (half priced)→ penalty=0.15
+        #   missing_fraction=1.0 (none priced)→ penalty=0.30
         missing_fraction = 1.0 - n_priced_conf / n_options_conf
-        conf -= 0.30 * missing_fraction
+        conf -= _IV_MISSING_CONFIDENCE_PENALTY * missing_fraction
 
     return max(0.10, conf)
 
