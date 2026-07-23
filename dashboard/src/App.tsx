@@ -4,33 +4,19 @@ import { RouterCard } from './components/RouterCard'
 import { AgentCard } from './components/AgentCard'
 import { DebatePanel } from './components/DebatePanel'
 import { SupervisorCard } from './components/SupervisorCard'
+import { PipelineProgress } from './components/PipelineProgress'
 
 const EXAMPLE_QUERIES = [
-  '2330 現在怎樣',
-  '台積電技術面分析',
-  '2317 鴻海值得買嗎',
-  '0050 目前總經環境如何',
+  { text: '2330 現在怎樣', hint: '單標的綜合分析' },
+  { text: '台積電技術面分析', hint: '技術指標深度' },
+  { text: '2317 鴻海值得買嗎', hint: '多面向評估' },
+  { text: '0050 目前總經環境如何', hint: '總經環境掃描' },
 ]
 
-function StatusBar({ status, currentEvent }: { status: string; currentEvent: string }) {
-  if (status === 'idle') return null
-
-  const colors: Record<string, string> = {
-    streaming: 'text-blue-400',
-    done: 'text-green-400',
-    error: 'text-red-400',
-  }
-
-  return (
-    <div className={`flex items-center gap-2 text-sm ${colors[status] ?? 'text-gray-400'}`}>
-      {status === 'streaming' && (
-        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-400" />
-      )}
-      {status === 'done' && <span>✓</span>}
-      {status === 'error' && <span>✗</span>}
-      <span>{currentEvent}</span>
-    </div>
-  )
+const STATUS_COLOR: Record<string, string> = {
+  streaming: 'text-blue-400',
+  done: 'text-green-400',
+  error: 'text-red-400',
 }
 
 export default function App() {
@@ -49,89 +35,128 @@ export default function App() {
   }
 
   const hasContent = state.router || Object.keys(state.agents).length > 0
+  const activeTarget = state.router?.targets?.[0]
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      {/* Header */}
-      <header className="border-b border-gray-800 bg-gray-950/80 backdrop-blur-sm sticky top-0 z-10">
+
+      {/* ── Header ───────────────────────────────────── */}
+      <header className="sticky top-0 z-10 border-b border-gray-800 bg-gray-950/90 backdrop-blur-sm">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <span className="text-2xl">📊</span>
             <div>
               <h1 className="text-lg font-black tracking-tight text-white">QuantDesk</h1>
               <p className="text-xs text-gray-500">AI 多智能體投研系統</p>
             </div>
           </div>
-          {hasContent && (
-            <button
-              onClick={reset}
-              className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-            >
-              清除
-            </button>
-          )}
+
+          <div className="flex items-center gap-3">
+            {/* Active target badge */}
+            {activeTarget && (
+              <span className="rounded-full border border-blue-700 bg-blue-900/40 px-3 py-1 text-xs font-bold text-blue-300">
+                {activeTarget}
+              </span>
+            )}
+
+            {/* Status indicator */}
+            {state.status !== 'idle' && (
+              <div className={`flex items-center gap-1.5 text-xs ${STATUS_COLOR[state.status] ?? 'text-gray-400'}`}>
+                {state.status === 'streaming' && (
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
+                )}
+                <span className="hidden sm:inline max-w-[200px] truncate">{state.currentEvent}</span>
+              </div>
+            )}
+
+            {hasContent && (
+              <button
+                onClick={reset}
+                className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-500 transition-colors hover:border-gray-500 hover:text-gray-300"
+              >
+                清除
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-4 py-6 space-y-6">
+      <main className="mx-auto max-w-5xl space-y-5 px-4 py-6">
 
-        {/* Query Input */}
-        <div className="rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+        {/* ── Query Input ───────────────────────────────── */}
+        <div className="rounded-xl border border-gray-700 bg-gray-800/50 p-4">
           <div className="flex gap-2">
-            <input
-              ref={inputRef}
-              type="text"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              onKeyDown={handleKey}
-              placeholder="輸入查詢，例如：2330 現在怎樣"
-              disabled={state.status === 'streaming'}
-              className="flex-1 rounded-lg border border-gray-600 bg-gray-900 px-3 py-2.5 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 disabled:opacity-50"
-            />
+            <div className="relative flex-1">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">🔍</span>
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                onKeyDown={handleKey}
+                placeholder="輸入查詢，例如：2330 現在怎樣"
+                disabled={state.status === 'streaming'}
+                className="w-full rounded-lg border border-gray-600 bg-gray-900 py-2.5 pl-9 pr-3 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 disabled:opacity-50 transition-colors"
+              />
+            </div>
             <button
               onClick={handleSubmit}
               disabled={!query.trim() || state.status === 'streaming'}
-              className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-blue-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-bold text-white transition-all hover:bg-blue-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {state.status === 'streaming' ? '分析中...' : '分析'}
+              {state.status === 'streaming' ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  分析中
+                </span>
+              ) : '分析'}
             </button>
           </div>
 
           {/* Example queries */}
           {state.status === 'idle' && (
             <div className="mt-3 flex flex-wrap gap-2">
-              {EXAMPLE_QUERIES.map(q => (
+              {EXAMPLE_QUERIES.map(({ text: q, hint }) => (
                 <button
                   key={q}
                   onClick={() => { setQuery(q); setTimeout(() => inputRef.current?.focus(), 0) }}
-                  className="rounded-full border border-gray-600 bg-gray-700/50 px-3 py-1 text-xs text-gray-300 transition-colors hover:border-blue-500 hover:text-blue-300"
+                  className="group flex items-center gap-1.5 rounded-full border border-gray-700 bg-gray-800/60 px-3 py-1.5 text-xs text-gray-300 transition-all hover:border-blue-600 hover:bg-blue-900/20 hover:text-blue-300"
                 >
-                  {q}
+                  <span>{q}</span>
+                  <span className="text-gray-600 group-hover:text-blue-500/60">· {hint}</span>
                 </button>
               ))}
             </div>
           )}
         </div>
 
-        {/* Status Bar */}
-        <StatusBar status={state.status} currentEvent={state.currentEvent} />
+        {/* ── Pipeline Progress ─────────────────────────── */}
+        <PipelineProgress state={state} />
 
-        {/* Error */}
+        {/* ── Error ────────────────────────────────────── */}
         {state.status === 'error' && state.error && (
-          <div className="rounded-xl border border-red-700 bg-red-900/20 p-4 text-sm text-red-300">
-            ✗ {state.error}
+          <div className="animate-fade-in rounded-xl border border-red-700 bg-red-900/20 p-4">
+            <div className="flex items-center gap-2 text-red-300">
+              <span className="text-lg">✗</span>
+              <span className="text-sm font-medium">{state.error}</span>
+            </div>
           </div>
         )}
 
-        {/* Router Card */}
+        {/* ── Router Card ───────────────────────────────── */}
         {state.router && <RouterCard router={state.router} />}
 
-        {/* Agent Cards */}
+        {/* ── Domain Agent Cards ────────────────────────── */}
         {state.agentOrder.length > 0 && (
           <div>
-            <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-500">
-              Domain Agents
-            </p>
+            <div className="mb-3 flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+                Domain Agents
+              </span>
+              <span className="text-xs text-gray-700">
+                {Object.values(state.agents).filter(a => !a.loading).length} / {state.agentOrder.length} 完成
+              </span>
+            </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               {state.agentOrder.map(agent => (
                 <AgentCard key={agent} data={state.agents[agent]} />
@@ -140,7 +165,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Debate Panel */}
+        {/* ── Debate Panel ──────────────────────────────── */}
         {state.debate.started && (
           <DebatePanel
             started={state.debate.started}
@@ -150,18 +175,30 @@ export default function App() {
           />
         )}
 
-        {/* Supervisor Final Verdict */}
+        {/* ── Supervisor Final Verdict ──────────────────── */}
         {state.supervisor && (
           <div>
+            <div className="mb-3 flex items-center gap-2">
+              <div className="h-px flex-1 bg-gray-800" />
+              <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+                最終仲裁結果
+              </span>
+              <div className="h-px flex-1 bg-gray-800" />
+            </div>
             <SupervisorCard data={state.supervisor} />
           </div>
         )}
 
-        {/* Done footer */}
+        {/* ── Done footer ───────────────────────────────── */}
         {state.status === 'done' && (
-          <p className="text-center text-xs text-gray-600 pb-4">
-            分析完成 · Router → Domain Agents → Debate → Supervisor
-          </p>
+          <div className="py-4 text-center space-y-1">
+            <p className="text-xs text-gray-500">
+              分析完成 · Router → Domain Agents → Multi-agent Debate → Supervisor
+            </p>
+            <p className="text-xs text-gray-700">
+              架構：LangGraph + GPT-4o · 確定性規則引擎 + LLM 仲裁
+            </p>
+          </div>
         )}
       </main>
     </div>
