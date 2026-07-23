@@ -72,6 +72,30 @@ interface Props {
 }
 
 export function AgentCard({ data }: Props) {
+  if (data.failed) {
+    return (
+      <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xl">{AGENT_ICON[data.agent] ?? '🤖'}</span>
+          <div>
+            <p className="text-sm font-bold text-red-400">
+              {AGENT_NAME[data.agent] ?? data.agent}
+            </p>
+            <p className="text-xs text-gray-600 capitalize">{data.agent} agent</p>
+          </div>
+          <span className="ml-auto rounded-full border border-red-800 bg-red-900/40 px-2 py-0.5 text-xs text-red-400">
+            失敗
+          </span>
+        </div>
+        {data.errors[0] && (
+          <p className="text-xs text-red-500/80 leading-relaxed mt-1 pl-7">
+            {data.errors[0]}
+          </p>
+        )}
+      </div>
+    )
+  }
+
   if (data.loading) {
     return (
       <div className="animate-pulse-slow rounded-xl border border-gray-700 bg-gray-800/60 p-4">
