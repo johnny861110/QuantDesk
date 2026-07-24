@@ -20,6 +20,7 @@ export interface AgentPayload {
   narrative_summary: string
   errors: string[]
   loading?: boolean
+  failed?: boolean   // true when agent_error received for this agent
 }
 
 export interface DebatePartyPayload {
@@ -65,6 +66,7 @@ export interface AnalysisState {
   debate: DebateState
   supervisor: SupervisorPayload | null
   error: string | null
+  elapsedMs: number | null   // set when status becomes 'done'
 }
 
 export const INITIAL_STATE: AnalysisState = {
@@ -76,4 +78,5 @@ export const INITIAL_STATE: AnalysisState = {
   debate: { bull: null, bear: null, pm: null, started: false },
   supervisor: null,
   error: null,
+  elapsedMs: null,
 }

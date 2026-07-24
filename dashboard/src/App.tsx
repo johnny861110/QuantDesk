@@ -154,10 +154,15 @@ export default function App() {
                 Domain Agents
               </span>
               <span className="text-xs text-gray-700">
-                {Object.values(state.agents).filter(a => !a.loading).length} / {state.agentOrder.length} 完成
+                {Object.values(state.agents).filter(a => !a.loading && !a.failed).length} 完成
+              {Object.values(state.agents).filter(a => a.failed).length > 0 && (
+                <span className="text-red-500 ml-1">
+                  · {Object.values(state.agents).filter(a => a.failed).length} 失敗
+                </span>
+              )}
               </span>
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {state.agentOrder.map(agent => (
                 <AgentCard key={agent} data={state.agents[agent]} />
               ))}
@@ -192,11 +197,18 @@ export default function App() {
         {/* ── Done footer ───────────────────────────────── */}
         {state.status === 'done' && (
           <div className="py-4 text-center space-y-1">
-            <p className="text-xs text-gray-500">
-              分析完成 · Router → Domain Agents → Multi-agent Debate → Supervisor
+            <p className="text-xs text-gray-500 flex items-center justify-center gap-2">
+              <span className="text-green-500">✓</span>
+              分析完成
+              {state.elapsedMs != null && (
+                <span className="text-gray-600">· 耗時 {(state.elapsedMs / 1000).toFixed(1)}s</span>
+              )}
             </p>
             <p className="text-xs text-gray-700">
-              架構：LangGraph + GPT-4o · 確定性規則引擎 + LLM 仲裁
+              Router → Domain Agents → Multi-agent Debate → Supervisor
+            </p>
+            <p className="text-xs text-gray-800">
+              LangGraph + GPT-4o · 確定性規則引擎 + LLM 仲裁
             </p>
           </div>
         )}
