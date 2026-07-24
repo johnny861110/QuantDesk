@@ -338,13 +338,14 @@ def _parse_institutional(
     → InstitutionalResult.
 
     FinMind 欄位：
-        date            : "YYYY-MM-DD"
-        name            : "外資及陸資" | "投信" | "自營商"（含自行買賣/避險）
-        buy             : 買進股數
-        sell            : 賣出股數
-        buy_sell        : 買賣超股數（= buy - sell）
+        date    : "YYYY-MM-DD"
+        name    : "Foreign_Investor" | "Investment_Trust" |
+                  "Dealer_self" | "Dealer_Hedging" | "Foreign_Dealer_Self"
+        buy     : 買進股數
+        sell    : 賣出股數
 
     每一個交易日有多筆（每個 name 一筆），需先 group by date，再分 name 匯總。
+    自營商 = Dealer_self + Dealer_Hedging（合計）。
     """
     from collections import defaultdict
 
@@ -366,24 +367,25 @@ def _parse_institutional(
         except ValueError:
             continue
 
-        def _buy_sell(name_key: str) -> tuple[float, float]:
-            """Return (buy_sell_shares, buy_sell_amount) for a name key."""
-            for k, v in day_rows.items():
-                if name_key in k:
-                    bs = float(v.get("buy_sell", 0) or 0)
-                    # FinMind 有時有 buy/sell 而無 buy_sell 欄位
-                    if bs == 0.0:
-                        b = float(v.get("buy", 0) or 0)
-                        s = float(v.get("sell", 0) or 0)
-                        bs = b - s
-                    # amount = buy_price * shares（有些版本有此欄，無則用 0）
-                    amt = float(v.get("buy_deal_volume", 0) or v.get("amount", 0) or 0)
-                    return bs, amt
-            return 0.0, 0.0
+        def _net(row: dict[str, Any]) -> float:
+            """買賣超股數 = buy - sell（FinMind 無 buy_sell 欄位）。"""
+            b = float(row.get("buy", 0) or 0)
+            s = float(row.get("sell", 0) or 0)
+            return b - s
 
-        f_shares, f_amt = _buy_sell("外資")
-        t_shares, t_amt = _buy_sell("投信")
-        d_shares, d_amt = _buy_sell("自營商")
+        # 外資：Foreign_Investor（主力）
+        foreign_row = day_rows.get("Foreign_Investor", {})
+        f_shares = _net(foreign_row)
+        f_amt = 0.0  # FinMind 此 dataset 無 amount 欄位
+
+        # 投信：Investment_Trust
+        trust_row = day_rows.get("Investment_Trust", {})
+        t_shares = _net(trust_row)
+        t_amt = 0.0
+
+        # 自營商：Dealer_self + Dealer_Hedging
+        d_shares = _net(day_rows.get("Dealer_self", {})) + _net(day_rows.get("Dealer_Hedging", {}))
+        d_amt = 0.0
 
         records.append(InstitutionalFlow(
             date=dt,
@@ -462,11 +464,11 @@ def _parse_margin(
         records.append(MarginRecord(
             date=dt,
             margin_purchase=float(row.get("MarginPurchaseBuy", 0) or 0),
-            margin_redemption=float(row.get("MarginPurchaseRedeem", 0) or 0),
-            margin_balance=float(row.get("MarginPurchaseToday", 0) or 0),
+            margin_redemption=float(row.get("MarginPurchaseCashRepayment", 0) or 0),
+            margin_balance=float(row.get("MarginPurchaseTodayBalance", 0) or 0),
             short_sale=float(row.get("ShortSaleSell", 0) or 0),
             short_cover=float(row.get("ShortSaleBuy", 0) or 0),
-            short_balance=float(row.get("ShortSaleToday", 0) or 0),
+            short_balance=float(row.get("ShortSaleTodayBalance", 0) or 0),
             offset=float(row.get("OffsetLoanAndShort", 0) or 0),
         ))
 
@@ -510,7 +512,7 @@ def _parse_shareholding(
     for row in sorted_rows:
         try:
             dt = date.fromisoformat(str(row["date"]))
-            ratio = float(row.get("ForeignInvestmentRatio", 0) or 0)
+            ratio = float(row.get("ForeignInvestmentSharesRatio", 0) or 0)
         except (KeyError, ValueError):
             continue
         records.append(ShareholdingRecord(

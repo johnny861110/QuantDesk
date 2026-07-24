@@ -329,13 +329,14 @@ class _MockChipAdapter(ChipDataAdapter):
 def _inst_rows(dates_and_values: list[tuple[str, float, float, float]]) -> list[dict[str, Any]]:
     """Build synthetic TaiwanStockInstitutionalInvestorsBuySell rows.
 
-    Each tuple: (date_str, foreign_buy_sell, trust_buy_sell, dealer_buy_sell)
+    Each tuple: (date_str, foreign_net, trust_net, dealer_net)
+    Uses real FinMind field format: English name + buy/sell columns.
     """
     rows = []
     for d, f, t, dealer in dates_and_values:
-        rows.append({"date": d, "name": "外資及陸資", "buy_sell": f, "buy": 0, "sell": 0})
-        rows.append({"date": d, "name": "投信", "buy_sell": t, "buy": 0, "sell": 0})
-        rows.append({"date": d, "name": "自營商", "buy_sell": dealer, "buy": 0, "sell": 0})
+        rows.append({"date": d, "name": "Foreign_Investor",  "buy": max(f, 0.0), "sell": max(-f, 0.0)})
+        rows.append({"date": d, "name": "Investment_Trust",  "buy": max(t, 0.0), "sell": max(-t, 0.0)})
+        rows.append({"date": d, "name": "Dealer_self",       "buy": max(dealer, 0.0), "sell": max(-dealer, 0.0)})
     return rows
 
 
@@ -343,16 +344,17 @@ def _margin_rows(dates_and_values: list[tuple[str, float, float]]) -> list[dict[
     """Build synthetic TaiwanStockMarginPurchaseShortSale rows.
 
     Each tuple: (date_str, margin_today, short_today)
+    Uses real FinMind field names: MarginPurchaseTodayBalance, ShortSaleTodayBalance.
     """
     return [
         {
             "date": d,
             "MarginPurchaseBuy": 100.0,
-            "MarginPurchaseRedeem": 0.0,
-            "MarginPurchaseToday": m,
+            "MarginPurchaseCashRepayment": 0.0,
+            "MarginPurchaseTodayBalance": m,
             "ShortSaleSell": 10.0,
             "ShortSaleBuy": 0.0,
-            "ShortSaleToday": s,
+            "ShortSaleTodayBalance": s,
             "OffsetLoanAndShort": 0.0,
         }
         for d, m, s in dates_and_values
@@ -360,11 +362,14 @@ def _margin_rows(dates_and_values: list[tuple[str, float, float]]) -> list[dict[
 
 
 def _shareholding_rows(dates_and_ratios: list[tuple[str, float]]) -> list[dict[str, Any]]:
-    """Build synthetic TaiwanStockShareholding rows."""
+    """Build synthetic TaiwanStockShareholding rows.
+
+    Uses real FinMind field name: ForeignInvestmentSharesRatio.
+    """
     return [
         {
             "date": d,
-            "ForeignInvestmentRatio": r,
+            "ForeignInvestmentSharesRatio": r,
             "ForeignInvestmentShares": 1_000_000.0,
             "NumberOfSharesIssued": 10_000_000.0,
         }
