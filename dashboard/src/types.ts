@@ -12,6 +12,15 @@ export interface RouterPayload {
   error?: string
 }
 
+export interface AgentHardConstraint {
+  type: string
+  current: number | null
+  limit: number | null
+  breached: boolean
+  verifiable: boolean
+  detail: string | null
+}
+
 export interface AgentPayload {
   agent: string
   signal: Signal
@@ -21,9 +30,13 @@ export interface AgentPayload {
   key_findings: Record<string, string | number | boolean | null>
   narrative_summary: string
   errors: string[]
+  hard_constraints?: AgentHardConstraint[]  // per-agent constraint details
+  asof?: string        // data timestamp ISO string
+  symbol?: string
+  market?: string
   loading?: boolean
-  failed?: boolean   // true when agent_error received for this agent
-  receivedAt?: number  // timestamp when agent_done was received
+  failed?: boolean
+  receivedAt?: number
 }
 
 export interface DebatePartyPayload {

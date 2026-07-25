@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { AgentPayload, Signal } from '../types'
 import { RiskGreeksChart } from './charts/RiskGreeksChart'
 import { TechnicalRadar } from './charts/TechnicalRadar'
@@ -70,11 +71,111 @@ function formatVal(v: string | number | boolean | null): string {
   return String(v)
 }
 
-interface Props {
-  data: AgentPayload
+/** Expandable metadata panel showing all intermediate data */
+function MetadataPanel({ data }: { data: AgentPayload }) {
+  const allFindings = Object.entries(data.key_findings)
+  const hcs = data.hard_constraints ?? []
+  const errs = data.errors ?? []
+
+  return (
+    <div className="mt-3 rounded-lg border border-gray-700/60 bg-gray-900/80 text-xs">
+      {/* Data timestamp */}
+      {data.asof && (
+        <div className="flex items-center justify-between border-b border-gray-800 px-3 py-1.5">
+          <span className="text-gray-500">資料時間戳</span>
+          <span className="font-mono text-gray-400">{new Date(data.asof).toLocaleString('zh-TW')}</span>
+        </div>
+      )}
+
+      {/* Symbol / Market */}
+      {(data.symbol || data.market) && (
+        <div className="flex items-center gap-4 border-b border-gray-800 px-3 py-1.5">
+          {data.symbol && <><span className="text-gray-500">標的</span><span className="font-mono text-gray-300">{data.symbol}</span></>}
+          {data.market && <><span className="text-gray-500 ml-3">市場</span><span className="font-mono text-gray-300">{data.market}</span></>}
+        </div>
+      )}
+
+      {/* Full key_findings table */}
+      {allFindings.length > 0 && (
+        <div className="border-b border-gray-800">
+          <p className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-600">
+            完整計算指標 ({allFindings.length})
+          </p>
+          <div className="max-h-48 overflow-y-auto px-3 pb-2 space-y-1">
+            {allFindings.map(([k, v]) => (
+              <div key={k} className="flex items-start justify-between gap-2">
+                <span className="text-gray-500 font-mono shrink-0">{k}</span>
+                <span className="text-gray-300 font-mono text-right break-all max-w-[55%]">
+                  {v === null ? '—' : typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Hard constraints */}
+      {hcs.length > 0 && (
+        <div className="border-b border-gray-800">
+          <p className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-600">
+            硬約束 ({hcs.length})
+          </p>
+          <div className="px-3 pb-2 space-y-1.5">
+            {hcs.map((hc, i) => (
+              <div key={i} className={`rounded px-2 py-1.5 ${hc.breached ? 'bg-red-950/60 border border-red-800/40' : 'bg-gray-800/60'}`}>
+                <div className="flex items-center justify-between">
+                  <span className={`font-mono font-bold ${hc.breached ? 'text-red-400' : 'text-gray-400'}`}>{hc.type}</span>
+                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${hc.breached ? 'bg-red-900/60 text-red-300' : 'bg-gray-700 text-gray-400'}`}>
+                    {hc.breached ? '⛔ BREACH' : '✓ OK'}
+                  </span>
+                </div>
+                {(hc.current !== null || hc.limit !== null) && (
+                  <div className="mt-0.5 flex gap-3 text-[10px] text-gray-500">
+                    {hc.current !== null && <span>current: <span className="text-gray-300 font-mono">{typeof hc.current === 'number' ? hc.current.toFixed(4) : hc.current}</span></span>}
+                    {hc.limit !== null && <span>limit: <span className="text-gray-300 font-mono">{hc.limit}</span></span>}
+                  </div>
+                )}
+                {hc.detail && (
+                  <p className="mt-1 text-[10px] text-gray-600 leading-tight">{hc.detail}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Errors / warnings */}
+      {errs.length > 0 && (
+        <div className="px-3 py-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-gray-600 mb-1">
+            Pipeline 錯誤 / 警告 ({errs.length})
+          </p>
+          <div className="space-y-1">
+            {errs.map((e, i) => (
+              <p key={i} className="text-yellow-500/80 leading-relaxed break-all">{e}</p>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Received time */}
+      {data.receivedAt && (
+        <div className="flex items-center justify-between border-t border-gray-800 px-3 py-1.5">
+          <span className="text-gray-600">接收時間</span>
+          <span className="font-mono text-gray-600">{new Date(data.receivedAt).toLocaleTimeString()}</span>
+        </div>
+      )}
+    </div>
+  )
 }
 
-export function AgentCard({ data }: Props) {
+interface Props {
+  data: AgentPayload
+  defaultExpanded?: boolean
+}
+
+export function AgentCard({ data, defaultExpanded = false }: Props) {
+  const [showMeta, setShowMeta] = useState(defaultExpanded)
   if (data.failed) {
     return (
       <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-4">
@@ -209,11 +310,21 @@ export function AgentCard({ data }: Props) {
         </span>
       </div>
 
-      {data.errors.length > 0 && (
-        <p className="mt-2 text-xs text-yellow-500 leading-relaxed">
-          ⚠ {data.errors[0]}
-        </p>
-      )}
+      {/* Metadata toggle */}
+      <button
+        onClick={() => setShowMeta(v => !v)}
+        className="mt-3 flex w-full items-center gap-1.5 rounded-lg border border-gray-700/50 bg-gray-900/40 px-2.5 py-1.5 text-left text-[11px] text-gray-500 transition-colors hover:border-gray-600 hover:text-gray-300"
+      >
+        <span>{showMeta ? '▾' : '▸'}</span>
+        <span>中繼資料</span>
+        <span className="ml-auto font-mono text-[10px] text-gray-700">
+          {Object.keys(data.key_findings).length} 指標
+          {(data.errors?.length ?? 0) > 0 && ` · ${data.errors.length} 警告`}
+          {(data.hard_constraints?.length ?? 0) > 0 && ` · ${data.hard_constraints!.length} 約束`}
+        </span>
+      </button>
+
+      {showMeta && <MetadataPanel data={data} />}
     </div>
   )
 }

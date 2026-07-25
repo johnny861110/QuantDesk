@@ -3,6 +3,7 @@ import { useAnalysis } from './hooks/useAnalysis'
 import { useQueryHistory } from './hooks/useQueryHistory'
 import { RouterCard } from './components/RouterCard'
 import { AgentCard } from './components/AgentCard'
+import { AgentSidebar } from './components/AgentSidebar'
 import { DebatePanel } from './components/DebatePanel'
 import { SupervisorCard } from './components/SupervisorCard'
 import { PipelineProgress } from './components/PipelineProgress'
@@ -24,8 +25,9 @@ const STATUS_COLOR: Record<string, string> = {
 export default function App() {
   const [query, setQuery] = useState('')
   const [showHistory, setShowHistory] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const { state, analyze, reset, retry } = useAnalysis()
+  const { state, analyze, analyzeAgent, reset, retry } = useAnalysis()
   const { history, addQuery, clearHistory } = useQueryHistory()
 
   const handleSubmit = () => {
@@ -69,13 +71,38 @@ export default function App() {
 
   const hasContent = state.router || Object.keys(state.agents).length > 0
   const activeTarget = state.router?.targets?.[0]
+  const activeAgents = state.router?.agents ?? []
+  const currentSymbol = activeTarget ?? query.match(/\b(\d{4})\b/)?.[1] ?? '2330'
+
+  const handleRunAgent = useCallback((agentId: string, sym: string) => {
+    analyzeAgent(agentId, sym)
+  }, [analyzeAgent])
+
+  const handleRunAll = useCallback(() => {
+    const q = query.trim() || `${currentSymbol} 完整分析`
+    analyze(q)
+  }, [query, currentSymbol, analyze])
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100">
+    <div className="flex h-screen overflow-hidden bg-gray-950 text-gray-100">
+
+      {/* ── Left Sidebar ─────────────────────────────── */}
+      <AgentSidebar
+        agents={state.agents}
+        activeAgents={activeAgents}
+        symbol={currentSymbol}
+        onRunAgent={handleRunAgent}
+        onRunAll={handleRunAll}
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(v => !v)}
+      />
+
+      {/* ── Main Content ─────────────────────────────── */}
+      <div className="flex flex-1 flex-col overflow-hidden">
 
       {/* ── Header ───────────────────────────────────── */}
-      <header className="sticky top-0 z-10 border-b border-gray-800 bg-gray-950/90 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
+      <header className="shrink-0 border-b border-gray-800 bg-gray-950/90 backdrop-blur-sm">
+        <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-3">
             <span className="text-2xl">📊</span>
             <div>
@@ -114,7 +141,8 @@ export default function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl space-y-5 px-4 py-6">
+      <main className="flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-4xl space-y-5 px-4 py-6">
 
         {/* ── Query Input ───────────────────────────────── */}
         <div className="rounded-xl border border-gray-700 bg-gray-800/50 p-4">
@@ -305,7 +333,9 @@ export default function App() {
             </p>
           </div>
         )}
+      </div>
       </main>
+      </div>
     </div>
   )
 }

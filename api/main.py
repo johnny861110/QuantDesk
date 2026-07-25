@@ -76,15 +76,39 @@ def _safe_val(v: Any) -> Any:
 
 
 def _serialize_agent(report: Any) -> dict[str, Any]:
+    """Serialize DomainReport to SSE payload including full intermediate metadata."""
+    # Full key_findings (all keys, not truncated)
+    full_findings = {k: _safe_val(v) for k, v in report.key_findings.items()}
+
+    # Hard constraints per-agent (if any)
+    hc_list = []
+    for hc in getattr(report, "hard_constraints", []):
+        hc_list.append({
+            "type": hc.type,
+            "current": hc.current,
+            "limit": hc.limit,
+            "breached": hc.breached,
+            "verifiable": hc.verifiable,
+            "detail": hc.detail,
+        })
+
+    # asof timestamp
+    asof = getattr(report, "asof", None)
+    asof_iso = asof.isoformat() if asof else None
+
     return {
         "agent": report.agent.value,
         "signal": report.signal.value,
         "confidence": report.confidence,
         "time_horizon": report.time_horizon.value,
         "data_completeness": report.data_completeness,
-        "key_findings": {k: _safe_val(v) for k, v in report.key_findings.items()},
+        "key_findings": full_findings,
         "narrative_summary": report.narrative_summary or "",
-        "errors": report.errors[:2] if report.errors else [],
+        "errors": report.errors or [],        # full list, not truncated
+        "hard_constraints": hc_list,          # per-agent constraint details
+        "asof": asof_iso,                     # data timestamp
+        "symbol": getattr(report, "symbol", None),
+        "market": getattr(report, "market", None),
     }
 
 
@@ -553,3 +577,67 @@ async def analyze_macro(market: str = "TW") -> StreamingResponse:
 async def analyze_risk() -> StreamingResponse:
     """組合風控快照（risk only，讀 positions.yaml）。"""
     return _sse_response(_stream_preset("portfolio_risk", "PORTFOLIO"))
+
+
+# ─── Single-agent Endpoint ────────────────────────────────────────────────────
+
+_VALID_AGENTS = {
+    "technical", "chip", "macro", "news",
+    "cross_market", "fundamental", "risk",
+}
+
+
+async def _stream_single_agent(
+    agent_name: str,
+    symbol: str,
+    market: str,
+) -> AsyncGenerator[str, None]:
+    """Run exactly one agent and stream its result, no Supervisor."""
+    from schemas.domain_report import RouterOutput  # noqa: PLC0415
+
+    router_out = RouterOutput(
+        scenario="single_stock",
+        targets=[symbol],
+        market=market,
+        depth="quick",
+        original_query=f"{symbol} {agent_name}",
+        query_type="stock_analysis",  # type: ignore[arg-type]
+        agents=[agent_name],
+        run_supervisor=False,
+        run_debate=False,
+    )
+    yield _sse("router", {
+        "scenario": router_out.scenario,
+        "targets": router_out.targets,
+        "market": router_out.market,
+        "depth": router_out.depth,
+        "query_type": router_out.query_type,
+        "agents": router_out.agents,
+        "method": "single_agent",
+    })
+    async for event in _stream_analysis_with_router(router_out):
+        yield event
+
+
+@app.get("/api/agent/{agent_name}")
+async def analyze_single_agent(
+    agent_name: str,
+    symbol: str = "2330",
+    market: str = "TW",
+) -> StreamingResponse:
+    """
+    單一 Agent SSE 串流。
+
+    Path param: agent_name ∈ {technical, chip, macro, news, cross_market, fundamental, risk}
+    Query params: symbol (default 2330), market (default TW)
+
+    回傳與 /api/analyze/stream 相同的 SSE 格式，但只有單一 agent 的
+    agent_start / agent_done（或 agent_error）+ done 事件。
+    """
+    if agent_name not in _VALID_AGENTS:
+        from fastapi.responses import JSONResponse  # noqa: PLC0415
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=400,
+            content={"error": f"Unknown agent: {agent_name!r}. Valid: {sorted(_VALID_AGENTS)}"},
+        )
+    return _sse_response(_stream_single_agent(agent_name, symbol, market))

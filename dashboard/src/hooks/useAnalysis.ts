@@ -123,64 +123,67 @@ function handleEvent(
   }
 }
 
+function startSSE(
+  url: string,
+  setState: React.Dispatch<React.SetStateAction<AnalysisState>>,
+  esRef: React.MutableRefObject<EventSource | null>,
+  startedAtRef: React.MutableRefObject<number>,
+) {
+  if (esRef.current) { esRef.current.close(); esRef.current = null }
+  startedAtRef.current = Date.now()
+  setState({ ...INITIAL_STATE, status: 'streaming' })
+
+  const es = new EventSource(url)
+  esRef.current = es
+
+  es.onmessage = (e: MessageEvent) => {
+    try {
+      const { type, payload } = JSON.parse(e.data as string)
+      setState(prev => handleEvent(prev, type as string, payload, startedAtRef.current))
+      if (type === 'done' || type === 'error') {
+        es.close()
+        esRef.current = null
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
+  es.onerror = () => {
+    setState(prev => ({ ...prev, status: 'error', error: '連線中斷，請重試。', currentEvent: '連線錯誤' }))
+    es.close()
+    esRef.current = null
+  }
+}
+
 export function useAnalysis() {
   const [state, setState] = useState<AnalysisState>(INITIAL_STATE)
   const esRef = useRef<EventSource | null>(null)
   const startedAtRef = useRef<number>(0)
   const lastQueryRef = useRef<string>('')
+  const lastUrlRef = useRef<string>('')
 
   const analyze = useCallback((query: string) => {
     lastQueryRef.current = query
-    // Close any existing connection
-    if (esRef.current) {
-      esRef.current.close()
-      esRef.current = null
-    }
-
-    // Reset state and record start time
-    startedAtRef.current = Date.now()
-    setState({ ...INITIAL_STATE, status: 'streaming' })
-
     const url = `/api/analyze/stream?query=${encodeURIComponent(query)}`
-    const es = new EventSource(url)
-    esRef.current = es
+    lastUrlRef.current = url
+    startSSE(url, setState, esRef, startedAtRef)
+  }, [])
 
-    es.onmessage = (e: MessageEvent) => {
-      try {
-        const { type, payload } = JSON.parse(e.data as string)
-        setState(prev => handleEvent(prev, type as string, payload, startedAtRef.current))
-        if (type === 'done' || type === 'error') {
-          es.close()
-          esRef.current = null
-        }
-      } catch {
-        // ignore parse errors
-      }
-    }
-
-    es.onerror = () => {
-      setState(prev => ({
-        ...prev,
-        status: 'error',
-        error: '連線中斷，請重試。',
-        currentEvent: '連線錯誤',
-      }))
-      es.close()
-      esRef.current = null
-    }
+  /** Run a single named agent against a specific symbol. */
+  const analyzeAgent = useCallback((agentName: string, symbol: string, market = 'TW') => {
+    lastQueryRef.current = `${symbol} ${agentName}`
+    const url = `/api/agent/${agentName}?symbol=${encodeURIComponent(symbol)}&market=${market}`
+    lastUrlRef.current = url
+    startSSE(url, setState, esRef, startedAtRef)
   }, [])
 
   const reset = useCallback(() => {
-    if (esRef.current) {
-      esRef.current.close()
-      esRef.current = null
-    }
+    if (esRef.current) { esRef.current.close(); esRef.current = null }
     setState(INITIAL_STATE)
   }, [])
 
   const retry = useCallback(() => {
-    if (lastQueryRef.current) analyze(lastQueryRef.current)
-  }, [analyze])
+    if (lastUrlRef.current) startSSE(lastUrlRef.current, setState, esRef, startedAtRef)
+  }, [])
 
-  return { state, analyze, reset, retry, lastQuery: lastQueryRef }
+  return { state, analyze, analyzeAgent, reset, retry, lastQuery: lastQueryRef }
 }
