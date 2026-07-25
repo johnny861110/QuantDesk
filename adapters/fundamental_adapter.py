@@ -343,6 +343,24 @@ class FundamentalAdapter(_BaseFundamentalAdapter):
             ).fetchone()
             return float(row[0]) if row and row[0] is not None else None
 
+    def get_latest_filing(self, stock_code: str) -> tuple[int, str] | None:
+        """Return (year, quarter) of the most recent insight_ready filing for stock_code.
+
+        Returns None if no filing exists in the DB.
+        """
+        with self._store.conn() as c:
+            row = c.execute(
+                text(
+                    "SELECT year, quarter FROM filings "
+                    "WHERE filing_key LIKE :prefix AND status='insight_ready' "
+                    "ORDER BY year DESC, quarter DESC LIMIT 1"
+                ),
+                {"prefix": f"{stock_code}_%"},
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row[0]), str(row[1])
+
     def _get_company_name(self, stock_code: str) -> str:
         with self._store.conn() as c:
             row = c.execute(

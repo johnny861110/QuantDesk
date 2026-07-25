@@ -298,10 +298,18 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                 )
 
             async def _fundamental() -> Any:
+                from adapters.fundamental_adapter import FundamentalAdapter as _FundamentalAdapter  # noqa: PLC0415
                 from agents.fundamental_agent import FundamentalAgent  # noqa: PLC0415
                 if not os.path.exists(_FUNDAMENTAL_DB_PATH):
                     raise FileNotFoundError("DB not found")
-                year, quarter = _current_year_quarter()
+                # Use the latest insight_ready filing in the DB rather than a
+                # calendar-derived quarter — avoids empty results when the current
+                # quarter has not been processed yet.
+                adapter = _FundamentalAdapter(_FUNDAMENTAL_DB_PATH)
+                filing = adapter.get_latest_filing(symbol)
+                if filing is None:
+                    raise ValueError(f"No financial data found for {symbol}")
+                year, quarter = filing
                 sig = await asyncio.to_thread(
                     FundamentalAgent(_FUNDAMENTAL_DB_PATH).run,
                     symbol, year, quarter,
