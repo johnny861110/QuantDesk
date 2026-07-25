@@ -51,7 +51,7 @@ app = FastAPI(title="QuantDesk API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "PUT", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -585,6 +585,34 @@ _VALID_AGENTS = {
     "technical", "chip", "macro", "news",
     "cross_market", "fundamental", "risk",
 }
+
+# ─── Positions CRUD ───────────────────────────────────────────────────────────
+
+_POSITIONS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "config", "positions.yaml"
+)
+
+
+@app.get("/api/positions")
+async def get_positions() -> Any:
+    """Return current positions.yaml as JSON."""
+    import yaml  # noqa: PLC0415
+    path = os.path.abspath(_POSITIONS_PATH)
+    if not os.path.exists(path):
+        return {"portfolio_nav": {"value": 1000000.0, "currency": "TWD"}, "positions": []}
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data
+
+
+@app.put("/api/positions")
+async def put_positions(body: dict[str, Any]) -> dict[str, str]:
+    """Write updated positions back to positions.yaml."""
+    import yaml  # noqa: PLC0415
+    path = os.path.abspath(_POSITIONS_PATH)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(body, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    return {"status": "ok"}
 
 
 async def _stream_single_agent(

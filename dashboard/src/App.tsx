@@ -7,6 +7,7 @@ import { AgentSidebar } from './components/AgentSidebar'
 import { DebatePanel } from './components/DebatePanel'
 import { SupervisorCard } from './components/SupervisorCard'
 import { PipelineProgress } from './components/PipelineProgress'
+import { PositionsPanel } from './components/PositionsPanel'
 import type { Signal } from './types'
 
 const EXAMPLE_QUERIES = [
@@ -26,6 +27,7 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [showHistory, setShowHistory] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [showPositions, setShowPositions] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const { state, analyze, analyzeAgent, reset, retry } = useAnalysis()
   const { history, addQuery, clearHistory } = useQueryHistory()
@@ -129,6 +131,13 @@ export default function App() {
               </div>
             )}
 
+            <button
+              onClick={() => setShowPositions(v => !v)}
+              className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition-colors hover:border-blue-600 hover:text-blue-400"
+              title="管理持倉"
+            >
+              🛡️ 持倉
+            </button>
             {hasContent && (
               <button
                 onClick={reset}
@@ -336,6 +345,9 @@ export default function App() {
       </div>
       </main>
       </div>
+
+      {/* ── Positions Panel ───────────────────────────── */}
+      {showPositions && <PositionsPanel onClose={() => setShowPositions(false)} />}
     </div>
   )
 }

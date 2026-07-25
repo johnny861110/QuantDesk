@@ -45,11 +45,81 @@ MOPS_TIMEOUT_SEC: int = 15
 
 # ─── RSS defaults ─────────────────────────────────────────────────────────────
 
+# General-purpose fallback feeds (low stock-specific coverage — used only when
+# no stock-specific feeds are available).
 DEFAULT_RSS_FEEDS: dict[str, str] = {
     "cnyes":  "https://feeds.cnyes.com/rss/news/tw.xml",
     "ctee":   "https://www.ctee.com.tw/feed",
 }
-RSS_MAX_ITEMS: int = 20   # per feed, to avoid bloat
+RSS_MAX_ITEMS: int = 30   # per feed
+
+# ─── Taiwan stock name lookup ─────────────────────────────────────────────────
+# Maps stock code → Chinese name for building search queries.
+# Common blue-chips; falls back to stock code if not found.
+
+TW_STOCK_NAMES: dict[str, str] = {
+    "2330": "台積電",
+    "2317": "鴻海",
+    "2454": "聯發科",
+    "2882": "國泰金",
+    "2881": "富邦金",
+    "2886": "兆豐金",
+    "2891": "中信金",
+    "2884": "玉山金",
+    "2892": "第一金",
+    "2885": "元大金",
+    "0050": "元大台灣50",
+    "0056": "元大高股息",
+    "2412": "中華電",
+    "3711": "日月光投控",
+    "2308": "台達電",
+    "2303": "聯電",
+    "2357": "華碩",
+    "2382": "廣達",
+    "2379": "瑞昱",
+    "6505": "台塑化",
+    "1301": "台塑",
+    "1303": "南亞",
+    "2002": "中鋼",
+    "2207": "和泰車",
+    "2327": "國巨",
+    "3008": "大立光",
+    "4938": "和碩",
+    "2409": "友達",
+    "2395": "研華",
+    "6669": "緯穎",
+}
+
+
+def _stock_chinese_name(symbol: str) -> str:
+    """Return Chinese name for the symbol, or the numeric code as fallback."""
+    code = _strip_tw_suffix(symbol)
+    return TW_STOCK_NAMES.get(code, code)
+
+
+def _build_stock_rss_feeds(symbol: str) -> dict[str, str]:
+    """
+    Build stock-specific RSS feed URLs.
+
+    Google News RSS with the Chinese stock name returns high-quality,
+    on-topic results.  Yahoo Finance RSS is a secondary source.
+    """
+    code = _strip_tw_suffix(symbol)
+    name = _stock_chinese_name(symbol)
+
+    feeds: dict[str, str] = {}
+
+    # Google News RSS (Chinese, Taiwan) — highest hit rate for TW stocks
+    query = f"{name} {code}" if name != code else code
+    feeds["google_news"] = (
+        f"https://news.google.com/rss/search"
+        f"?q={query}&hl=zh-TW&gl=TW&ceid=TW%3Azh-Hant"
+    )
+
+    # Yahoo Finance RSS for the .TW ticker
+    feeds["yahoo_finance"] = f"https://finance.yahoo.com/rss/headline?s={code}.TW"
+
+    return feeds
 
 # ─── Data structures ──────────────────────────────────────────────────────────
 
@@ -147,15 +217,24 @@ class MopsNewsAdapter(NewsAdapter):
 
 class RSSNewsAdapter(NewsAdapter):
     """
-    RSS 財經媒體 adapter（鉅亨網、工商時報等）。
+    RSS 財經媒體 adapter — 個股專屬 Google News + Yahoo Finance。
 
-    依 feed_urls 逐一拉取 RSS，過濾含 query_terms 的標題，取最新 max_items 則。
-    _fetch_raw() 是唯一的 network I/O 點。
+    改版重點
+    --------
+    原本使用全市場通用 RSS（鉅亨/工商時報）再用股票代碼過濾，命中率極低。
+    現在改為：
+    1. 優先使用 _build_stock_rss_feeds(symbol) 建立個股專屬搜尋 URL
+       - Google News RSS：搜尋「中文名稱 股號」，高命中率
+       - Yahoo Finance RSS：同 ticker 個股新聞
+    2. 僅在 feed_urls 明確傳入時使用傳入的 URL（向後相容 + 測試用）
+    3. Google News 結果不需要再過濾（搜尋已針對個股），直接取最近幾筆
+
+    _fetch_raw() 是唯一的 network I/O 點，測試可 monkeypatch。
 
     Usage
     -----
         adapter = RSSNewsAdapter()
-        data    = adapter.fetch(symbol="2330.TW", query_terms=["台積電", "TSMC"])
+        data    = adapter.fetch(symbol="2330.TW")   # 自動用個股 Google News + Yahoo
     """
 
     def __init__(
@@ -163,7 +242,8 @@ class RSSNewsAdapter(NewsAdapter):
         feed_urls: dict[str, str] | None = None,
         max_items: int = RSS_MAX_ITEMS,
     ) -> None:
-        self._feed_urls = feed_urls if feed_urls is not None else DEFAULT_RSS_FEEDS
+        # None = auto-build per-symbol feeds in fetch(); explicit dict = use as-is
+        self._feed_urls_override = feed_urls
         self._max_items = max_items
 
     @property
@@ -177,15 +257,27 @@ class RSSNewsAdapter(NewsAdapter):
         days_back: int = 7,
         **kwargs: Any,
     ) -> SourcedData:
-        terms = query_terms or [_strip_tw_suffix(symbol)]
         cutoff = datetime.now(UTC) - timedelta(days=days_back)
         fetched_at = datetime.now(UTC)
 
+        # Build feed list: use stock-specific URLs unless caller overrides
+        feed_urls = self._feed_urls_override or _build_stock_rss_feeds(symbol)
+
+        # Query terms for post-fetch filtering (only used for general feeds)
+        # For stock-specific Google News, the search already targets the stock.
+        code = _strip_tw_suffix(symbol)
+        name = _stock_chinese_name(symbol)
+        terms = query_terms or ([name, code] if name != code else [code])
+
         all_items: list[NewsItem] = []
-        for feed_name, feed_url in self._feed_urls.items():
+        for feed_name, feed_url in feed_urls.items():
             raw_feed = self._fetch_raw(feed_url)
+            # Google News / Yahoo Finance feeds are already stock-specific →
+            # skip the keyword filter; just apply the recency cutoff.
+            is_stock_specific = feed_name in ("google_news", "yahoo_finance")
+            filter_terms = [] if is_stock_specific else terms
             items = _parse_rss_feed(
-                raw_feed, feed_name, terms, cutoff, self._max_items
+                raw_feed, feed_name, filter_terms or [""], cutoff, self._max_items
             )
             all_items.extend(items)
 
@@ -198,13 +290,16 @@ class RSSNewsAdapter(NewsAdapter):
         return SourcedData(payload=payload, source=self.source_name, asof=fetched_at)
 
     def _fetch_raw(self, feed_url: str) -> Any:
-        """Parse RSS feed URL and return feedparser result. Override in tests."""
+        """Fetch RSS feed and return feedparser result. Override in tests."""
         import feedparser  # type: ignore[import-untyped]
         import requests  # noqa: PLC0415
 
-        # Use requests with explicit timeout so feedparser never blocks indefinitely.
         try:
-            resp = requests.get(feed_url, timeout=10)
+            resp = requests.get(
+                feed_url, timeout=10,
+                verify=False,   # some TW financial sites have non-standard certs
+                headers={"User-Agent": "Mozilla/5.0 (compatible; QuantDesk/1.0)"},
+            )
             resp.raise_for_status()
             return feedparser.parse(resp.content)
         except Exception:
@@ -351,10 +446,13 @@ def _parse_rss_feed(
         summary: str = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
         url: str = getattr(entry, "link", "") or ""
 
-        # Filter: at least one query term must appear in title or summary
-        combined = (title + " " + summary).lower()
-        if not any(t.lower() in combined for t in query_terms):
-            continue
+        # Filter: skip if query_terms is non-empty and none match title/summary.
+        # Empty query_terms means the feed is already stock-specific (e.g. Google
+        # News search RSS) — no additional keyword filtering needed.
+        if query_terms and query_terms != [""]:
+            combined = (title + " " + summary).lower()
+            if not any(t.lower() in combined for t in query_terms):
+                continue
 
         # Parse publication date (always naive UTC for consistent comparison)
         pub_dt: datetime | None = None
