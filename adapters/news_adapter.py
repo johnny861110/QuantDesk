@@ -200,8 +200,15 @@ class RSSNewsAdapter(NewsAdapter):
     def _fetch_raw(self, feed_url: str) -> Any:
         """Parse RSS feed URL and return feedparser result. Override in tests."""
         import feedparser  # type: ignore[import-untyped]
+        import requests  # noqa: PLC0415
 
-        return feedparser.parse(feed_url)
+        # Use requests with explicit timeout so feedparser never blocks indefinitely.
+        try:
+            resp = requests.get(feed_url, timeout=10)
+            resp.raise_for_status()
+            return feedparser.parse(resp.content)
+        except Exception:
+            return feedparser.FeedParserDict(entries=[])
 
 
 # ─── Tavily Adapter ───────────────────────────────────────────────────────────

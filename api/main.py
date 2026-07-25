@@ -27,7 +27,7 @@ import asyncio
 import json
 import os
 import platform
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,6 +37,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 load_dotenv()
+
+# Maximum concurrent SSE analysis requests — prevents thread-pool exhaustion
+# under high load (each analysis spawns ~7 threads).
+_ANALYSIS_SEMAPHORE = asyncio.Semaphore(5)
+
+# Per-agent wall-clock timeout in seconds.
+# News agent with 2 RSS feeds × 10s HTTP timeout + LLM = ~25s worst case.
+_AGENT_TIMEOUT: float = 45.0
 
 app = FastAPI(title="QuantDesk API", version="1.0.0")
 
@@ -88,9 +96,16 @@ def _serialize_supervisor(output: Any) -> dict[str, Any]:
             "evidence_confidence": result.evidence_confidence,
             "agents": [a.value for a, _, _ in result.contributing_agents],
         }
-    # Serialize individual hard constraint details for frontend display
+    # Serialize individual hard constraint details for frontend display.
+    # Deduplicate: a constraint can appear in both hard_constraint_breaches
+    # and unverifiable_constraints — show it only once.
     hc_details = []
+    _seen_hc: set[tuple[str, str]] = set()
     for agent, hc in output.hard_constraint_breaches + output.unverifiable_constraints:
+        key = (agent.value, hc.type)
+        if key in _seen_hc:
+            continue
+        _seen_hc.add(key)
         hc_details.append({
             "agent": agent.value,
             "type": hc.type,
@@ -146,268 +161,250 @@ def _current_year_quarter() -> tuple[int, str]:
 
 async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C901, PLR0912, PLR0915
     """
-    全流程 SSE 生成器：
-      Router → Technical + Chip + Macro + News + CrossMarket + Fundamental → aggregate_debate()
+    SSE generator with semaphore, parallel agents, and per-agent timeouts.
+
+    Concurrency design
+    ------------------
+    All domain agents run in parallel via asyncio tasks + queue.  Each agent is
+    wrapped with asyncio.wait_for(_AGENT_TIMEOUT) so a stalled HTTP call (e.g.
+    RSS feed with no timeout) cannot block the entire pipeline.  The queue lets
+    the SSE stream emit agent_done events in completion order, giving the client
+    progressive updates instead of a single batch.
+
+    High-concurrency safety
+    -----------------------
+    _ANALYSIS_SEMAPHORE limits concurrent analyses to 5, preventing thread-pool
+    exhaustion when many users connect simultaneously.
     """
-    try:
-        asof = datetime.now(tz=UTC)
 
-        # ── Step 1: Router ────────────────────────────────────────────────────
+    # ── Queue-based parallel agent runner ─────────────────────────────────────
+    # Each agent task puts ("start"|"done"|"error", agent_name, data) into the
+    # queue.  The main loop drains the queue and yields SSE events progressively.
+
+    _AgentQueueItem = tuple[str, str, Any]  # (kind, agent_name, data)
+
+    async def _run_agent(
+        name: str,
+        coro: Coroutine[Any, Any, Any],
+        queue: asyncio.Queue[_AgentQueueItem],
+    ) -> None:
+        await queue.put(("start", name, None))
         try:
-            from router.intent_router import route  # noqa: PLC0415
-            router_out = await asyncio.to_thread(route, query)
-            yield _sse("router", {
-                "scenario": router_out.scenario,
-                "targets": router_out.targets,
-                "market": router_out.market,
-                "depth": router_out.depth,
-                "method": "llm",
-            })
+            result = await asyncio.wait_for(coro, timeout=_AGENT_TIMEOUT)
+            await queue.put(("done", name, result))
+        except asyncio.TimeoutError:
+            await queue.put(("error", name, f"timeout after {_AGENT_TIMEOUT:.0f}s"))
         except Exception as exc:  # noqa: BLE001
-            yield _sse("router", {
-                "scenario": "single_stock",
-                "targets": ["2330"],
-                "market": "TW",
-                "depth": "standard",
-                "method": "fallback",
-                "error": str(exc)[:80],
-            })
-            router_out = type("R", (), {  # type: ignore[assignment]
-                "scenario": "single_stock",
-                "targets": ["2330"],
-                "market": "TW",
-                "depth": "standard",
-            })()
+            await queue.put(("error", name, str(exc)[:120]))
 
-        symbol: str = router_out.targets[0] if router_out.targets else "2330"
-        market: str = getattr(router_out, "market", "TW")
-        reports: list[Any] = []
-
-        # ── Step 2: Domain Agents ─────────────────────────────────────────────
-
-        # Technical
-        yield _sse("agent_start", {"agent": "technical"})
+    async with _ANALYSIS_SEMAPHORE:
         try:
-            from agents.technical_agent import run_technical_agent  # noqa: PLC0415
+            asof = datetime.now(tz=UTC)
+
+            # ── Step 1: Router ────────────────────────────────────────────────
+            try:
+                from router.intent_router import route  # noqa: PLC0415
+                router_out = await asyncio.wait_for(
+                    asyncio.to_thread(route, query), timeout=30.0
+                )
+                yield _sse("router", {
+                    "scenario": router_out.scenario,
+                    "targets": router_out.targets,
+                    "market": router_out.market,
+                    "depth": router_out.depth,
+                    "method": "llm",
+                })
+            except Exception as exc:  # noqa: BLE001
+                yield _sse("router", {
+                    "scenario": "single_stock",
+                    "targets": ["2330"],
+                    "market": "TW",
+                    "depth": "standard",
+                    "method": "fallback",
+                    "error": str(exc)[:80],
+                })
+                router_out = type("R", (), {  # type: ignore[assignment]
+                    "scenario": "single_stock",
+                    "targets": ["2330"],
+                    "market": "TW",
+                    "depth": "standard",
+                })()
+
+            symbol: str = router_out.targets[0] if router_out.targets else "2330"
+            market: str = getattr(router_out, "market", "TW")
+
+            # ── Step 2: Build agent coroutines ────────────────────────────────
+            # Lazy imports inside coroutines keep module load fast.
+
             from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
             from schemas.domain_report import DomainReport  # noqa: PLC0415
 
-            tech_signal = await asyncio.to_thread(
-                run_technical_agent, symbol=symbol, market=market, asof=asof
-            )
-            tech_report = DomainReport(
-                agent=AgentType.TECHNICAL,
-                symbol=symbol,
-                market=market,
-                asof=asof,
-                signal=tech_signal.signal,
-                confidence=tech_signal.confidence,
-                time_horizon=TimeHorizon.SHORT,
-                key_findings=tech_signal.metrics,
-                narrative_summary=tech_signal.narrative,
-                data_completeness=tech_signal.data_quality.completeness,
-            )
-            reports.append(tech_report)
-            yield _sse("agent_done", _serialize_agent(tech_report))
-        except Exception as exc:  # noqa: BLE001
-            yield _sse("agent_error", {"agent": "technical", "error": str(exc)[:120]})
+            async def _technical() -> Any:
+                from agents.technical_agent import run_technical_agent  # noqa: PLC0415
+                sig = await asyncio.to_thread(
+                    run_technical_agent, symbol=symbol, market=market, asof=asof
+                )
+                return DomainReport(
+                    agent=AgentType.TECHNICAL, symbol=symbol, market=market, asof=asof,
+                    signal=sig.signal, confidence=sig.confidence,
+                    time_horizon=TimeHorizon.SHORT, key_findings=sig.metrics,
+                    narrative_summary=sig.narrative,
+                    data_completeness=sig.data_quality.completeness,
+                )
 
-        # Chip
-        yield _sse("agent_start", {"agent": "chip"})
-        try:
-            from agents.chip_agent import run_chip_agent  # noqa: PLC0415
+            async def _chip() -> Any:
+                from agents.chip_agent import run_chip_agent  # noqa: PLC0415
+                return await asyncio.to_thread(
+                    run_chip_agent, symbol=symbol, market=market, asof=asof
+                )
 
-            chip_report = await asyncio.to_thread(
-                run_chip_agent, symbol=symbol, market=market, asof=asof
-            )
-            reports.append(chip_report)
-            yield _sse("agent_done", _serialize_agent(chip_report))
-        except Exception as exc:  # noqa: BLE001
-            yield _sse("agent_error", {"agent": "chip", "error": str(exc)[:120]})
+            async def _macro() -> Any:
+                from agents.macro_agent import run_macro_agent  # noqa: PLC0415
+                sig = await asyncio.to_thread(
+                    run_macro_agent, symbol=symbol, market=market, asof=asof
+                )
+                return DomainReport(
+                    agent=AgentType.MACRO, symbol=symbol, market=market, asof=asof,
+                    signal=sig.signal, confidence=sig.confidence,
+                    time_horizon=TimeHorizon.MEDIUM, key_findings=sig.metrics,
+                    narrative_summary=sig.narrative,
+                    data_completeness=sig.data_quality.completeness,
+                )
 
-        # Macro
-        yield _sse("agent_start", {"agent": "macro"})
-        try:
-            from agents.macro_agent import run_macro_agent  # noqa: PLC0415
-            from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
-            from schemas.domain_report import DomainReport  # noqa: PLC0415
+            async def _news() -> Any:
+                from agents.news_agent import run_news_agent  # noqa: PLC0415
+                sig = await asyncio.to_thread(
+                    run_news_agent, symbol=symbol, market=market, asof=asof
+                )
+                return DomainReport(
+                    agent=AgentType.NEWS, symbol=symbol, market=market, asof=asof,
+                    signal=sig.signal, confidence=sig.confidence,
+                    time_horizon=TimeHorizon.SHORT, key_findings=sig.metrics,
+                    narrative_summary=sig.narrative,
+                    data_completeness=sig.data_quality.completeness,
+                )
 
-            macro_signal = await asyncio.to_thread(
-                run_macro_agent, symbol=symbol, market=market, asof=asof
-            )
-            macro_report = DomainReport(
-                agent=AgentType.MACRO,
-                symbol=symbol,
-                market=market,
-                asof=asof,
-                signal=macro_signal.signal,
-                confidence=macro_signal.confidence,
-                time_horizon=TimeHorizon.MEDIUM,
-                key_findings=macro_signal.metrics,
-                narrative_summary=macro_signal.narrative,
-                data_completeness=macro_signal.data_quality.completeness,
-            )
-            reports.append(macro_report)
-            yield _sse("agent_done", _serialize_agent(macro_report))
-        except Exception as exc:  # noqa: BLE001
-            yield _sse("agent_error", {"agent": "macro", "error": str(exc)[:120]})
+            async def _cross_market() -> Any:
+                from agents.cross_market_agent import run_cross_market_agent  # noqa: PLC0415
+                sig = await asyncio.to_thread(
+                    run_cross_market_agent, market=market, asof=asof
+                )
+                return DomainReport(
+                    agent=AgentType.CROSS_MARKET, symbol=symbol, market=market, asof=asof,
+                    signal=sig.signal, confidence=sig.confidence,
+                    time_horizon=TimeHorizon.MEDIUM, key_findings=sig.metrics,
+                    narrative_summary=sig.narrative,
+                    data_completeness=sig.data_quality.completeness,
+                )
 
-        # News
-        yield _sse("agent_start", {"agent": "news"})
-        try:
-            from agents.news_agent import run_news_agent  # noqa: PLC0415
-            from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
-            from schemas.domain_report import DomainReport  # noqa: PLC0415
-
-            news_signal = await asyncio.to_thread(
-                run_news_agent, symbol=symbol, market=market, asof=asof
-            )
-            news_report = DomainReport(
-                agent=AgentType.NEWS,
-                symbol=symbol,
-                market=market,
-                asof=asof,
-                signal=news_signal.signal,
-                confidence=news_signal.confidence,
-                time_horizon=TimeHorizon.SHORT,
-                key_findings=news_signal.metrics,
-                narrative_summary=news_signal.narrative,
-                data_completeness=news_signal.data_quality.completeness,
-            )
-            reports.append(news_report)
-            yield _sse("agent_done", _serialize_agent(news_report))
-        except Exception as exc:  # noqa: BLE001
-            yield _sse("agent_error", {"agent": "news", "error": str(exc)[:120]})
-
-        # Cross Market (no symbol param — analyzes market-wide cross-asset signals)
-        yield _sse("agent_start", {"agent": "cross_market"})
-        try:
-            from agents.cross_market_agent import run_cross_market_agent  # noqa: PLC0415
-            from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
-            from schemas.domain_report import DomainReport  # noqa: PLC0415
-
-            cm_signal = await asyncio.to_thread(
-                run_cross_market_agent, market=market, asof=asof
-            )
-            cm_report = DomainReport(
-                agent=AgentType.CROSS_MARKET,
-                symbol=symbol,
-                market=market,
-                asof=asof,
-                signal=cm_signal.signal,
-                confidence=cm_signal.confidence,
-                time_horizon=TimeHorizon.MEDIUM,
-                key_findings=cm_signal.metrics,
-                narrative_summary=cm_signal.narrative,
-                data_completeness=cm_signal.data_quality.completeness,
-            )
-            reports.append(cm_report)
-            yield _sse("agent_done", _serialize_agent(cm_report))
-        except Exception as exc:  # noqa: BLE001
-            yield _sse("agent_error", {"agent": "cross_market", "error": str(exc)[:120]})
-
-        # Fundamental (requires FinancialReports SQLite DB)
-        yield _sse("agent_start", {"agent": "fundamental"})
-        try:
-            import os  # noqa: PLC0415
-            from agents.fundamental_agent import FundamentalAgent  # noqa: PLC0415
-            from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
-            from schemas.domain_report import DomainReport  # noqa: PLC0415
-
-            if os.path.exists(_FUNDAMENTAL_DB_PATH):
+            async def _fundamental() -> Any:
+                from agents.fundamental_agent import FundamentalAgent  # noqa: PLC0415
+                if not os.path.exists(_FUNDAMENTAL_DB_PATH):
+                    raise FileNotFoundError("DB not found")
                 year, quarter = _current_year_quarter()
-                fund_signal = await asyncio.to_thread(
+                sig = await asyncio.to_thread(
                     FundamentalAgent(_FUNDAMENTAL_DB_PATH).run,
                     symbol, year, quarter,
                 )
-                fund_report = DomainReport(
-                    agent=AgentType.FUNDAMENTAL,
-                    symbol=symbol,
-                    market=market,
-                    asof=asof,
-                    signal=fund_signal.signal,
-                    confidence=fund_signal.confidence,
-                    time_horizon=TimeHorizon.LONG,
-                    key_findings=fund_signal.metrics,
-                    hard_constraints=fund_signal.hard_constraints,
-                    narrative_summary=fund_signal.narrative,
-                    data_completeness=fund_signal.data_quality.completeness,
+                return DomainReport(
+                    agent=AgentType.FUNDAMENTAL, symbol=symbol, market=market, asof=asof,
+                    signal=sig.signal, confidence=sig.confidence,
+                    time_horizon=TimeHorizon.LONG, key_findings=sig.metrics,
+                    hard_constraints=sig.hard_constraints,
+                    narrative_summary=sig.narrative,
+                    data_completeness=sig.data_quality.completeness,
                 )
-                reports.append(fund_report)
-                yield _sse("agent_done", _serialize_agent(fund_report))
-            else:
-                yield _sse("agent_error", {"agent": "fundamental", "error": "DB not found"})
-        except Exception as exc:  # noqa: BLE001
-            yield _sse("agent_error", {"agent": "fundamental", "error": str(exc)[:120]})
 
-        # Risk (portfolio Greeks — uses default positions.yaml + spot_map)
-        yield _sse("agent_start", {"agent": "risk"})
-        try:
-            from agents.risk_agent import run_risk_agent  # noqa: PLC0415
-            from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
-            from schemas.domain_report import DomainReport  # noqa: PLC0415
+            async def _risk() -> Any:
+                from agents.risk_agent import run_risk_agent  # noqa: PLC0415
+                sig = await asyncio.to_thread(run_risk_agent, asof=asof)
+                return DomainReport(
+                    agent=AgentType.RISK, symbol=symbol, market=market, asof=asof,
+                    signal=sig.signal, confidence=sig.confidence,
+                    time_horizon=TimeHorizon.SHORT,
+                    key_findings={k: _safe_val(v) for k, v in sig.metrics.items()},
+                    hard_constraints=sig.hard_constraints,
+                    narrative_summary=sig.narrative,
+                    data_completeness=sig.data_quality.completeness,
+                )
 
-            risk_signal = await asyncio.to_thread(run_risk_agent, asof=asof)
-            risk_report = DomainReport(
-                agent=AgentType.RISK,
-                symbol=symbol,
-                market=market,
-                asof=asof,
-                signal=risk_signal.signal,
-                confidence=risk_signal.confidence,
-                time_horizon=TimeHorizon.SHORT,
-                key_findings={k: _safe_val(v) for k, v in risk_signal.metrics.items()},
-                hard_constraints=risk_signal.hard_constraints,
-                narrative_summary=risk_signal.narrative,
-                data_completeness=risk_signal.data_quality.completeness,
-            )
-            reports.append(risk_report)
-            yield _sse("agent_done", _serialize_agent(risk_report))
-        except Exception as exc:  # noqa: BLE001
-            yield _sse("agent_error", {"agent": "risk", "error": str(exc)[:120]})
+            # ── Step 3: Launch all agents in parallel ─────────────────────────
+            queue: asyncio.Queue[_AgentQueueItem] = asyncio.Queue()
+            agent_defs = [
+                ("technical",   _technical()),
+                ("chip",        _chip()),
+                ("macro",       _macro()),
+                ("news",        _news()),
+                ("cross_market", _cross_market()),
+                ("fundamental", _fundamental()),
+                ("risk",        _risk()),
+            ]
+            n_agents = len(agent_defs)
+            tasks = [
+                asyncio.create_task(_run_agent(name, coro, queue))
+                for name, coro in agent_defs
+            ]
 
-        if not reports:
-            yield _sse("error", {"message": "所有 domain agents 均失敗，無法進行仲裁。"})
+            # Drain the queue as agents complete; emit SSE events progressively.
+            reports: list[Any] = []
+            n_done = 0
+            while n_done < n_agents:
+                kind, name, data = await queue.get()
+                if kind == "start":
+                    yield _sse("agent_start", {"agent": name})
+                elif kind == "done":
+                    n_done += 1
+                    reports.append(data)
+                    yield _sse("agent_done", _serialize_agent(data))
+                else:  # "error"
+                    n_done += 1
+                    yield _sse("agent_error", {"agent": name, "error": data})
+
+            # Ensure all tasks are properly awaited (they should be done by now).
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            if not reports:
+                yield _sse("error", {"message": "所有 domain agents 均失敗，無法進行仲裁。"})
+                yield _sse("done", {})
+                return
+
+            # ── Step 4: Debate + Supervisor ───────────────────────────────────
+            yield _sse("debate_start", {})
+            try:
+                from supervisor.graph import Supervisor  # noqa: PLC0415
+
+                sup_out, debate_out = await Supervisor().aggregate_debate(
+                    domain_reports=reports,
+                    symbol=symbol,
+                    scenario=getattr(router_out, "scenario", "single_stock"),
+                )
+
+                yield _sse("debate_bull", {
+                    "thesis": debate_out.bull.thesis,
+                    "key_points": debate_out.bull.key_points,
+                    "confidence": debate_out.bull.confidence,
+                })
+                yield _sse("debate_bear", {
+                    "thesis": debate_out.bear.thesis,
+                    "key_points": debate_out.bear.key_points,
+                    "confidence": debate_out.bear.confidence,
+                })
+                yield _sse("debate_pm", {
+                    "thesis": debate_out.pm_verdict.thesis,
+                    "key_points": debate_out.pm_verdict.key_points,
+                    "confidence": debate_out.pm_verdict.confidence,
+                    "signal": debate_out.final_signal.value,
+                })
+                yield _sse("supervisor", _serialize_supervisor(sup_out))
+
+            except Exception as exc:  # noqa: BLE001
+                yield _sse("error", {"message": f"Debate/Supervisor 失敗: {str(exc)[:120]}"})
+
             yield _sse("done", {})
-            return
-
-        # ── Step 3: Debate + Supervisor ───────────────────────────────────────
-        yield _sse("debate_start", {})
-        try:
-            from supervisor.graph import Supervisor  # noqa: PLC0415
-
-            sup_out, debate_out = await Supervisor().aggregate_debate(
-                domain_reports=reports,
-                symbol=symbol,
-                scenario=getattr(router_out, "scenario", "single_stock"),
-            )
-
-            yield _sse("debate_bull", {
-                "thesis": debate_out.bull.thesis,
-                "key_points": debate_out.bull.key_points,
-                "confidence": debate_out.bull.confidence,
-            })
-            yield _sse("debate_bear", {
-                "thesis": debate_out.bear.thesis,
-                "key_points": debate_out.bear.key_points,
-                "confidence": debate_out.bear.confidence,
-            })
-            yield _sse("debate_pm", {
-                "thesis": debate_out.pm_verdict.thesis,
-                "key_points": debate_out.pm_verdict.key_points,
-                "confidence": debate_out.pm_verdict.confidence,
-                "signal": debate_out.final_signal.value,
-            })
-            yield _sse("supervisor", _serialize_supervisor(sup_out))
 
         except Exception as exc:  # noqa: BLE001
-            yield _sse("error", {"message": f"Debate/Supervisor 失敗: {str(exc)[:120]}"})
-
-        yield _sse("done", {})
-
-    except Exception as exc:  # noqa: BLE001
-        yield _sse("error", {"message": str(exc)[:200]})
-        yield _sse("done", {})
+            yield _sse("error", {"message": str(exc)[:200]})
+            yield _sse("done", {})
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -417,7 +414,7 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
 async def health() -> dict[str, str]:
     return {
         "status": "ok",
-        "finmind": "set" if os.environ.get("FINMIND_KEY") else "unset",
+        "finmind": "set" if os.environ.get("FINMIND_TOKEN") or os.environ.get("FINMIND_KEY") else "unset",
         "openai": "set" if os.environ.get("OPENAI_API_KEY") else "unset",
     }
 
