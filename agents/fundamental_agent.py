@@ -545,12 +545,17 @@ def _node_synthesize(state: FundamentalAgentState) -> dict:
         update_current_span(output={"skipped": True, "reason": "no_api_key"})
         return {"narrative": ""}   # Verifier will find no numbers to flag
 
+    # 無財報資料時直接返回，不呼叫 LLM 避免產生幻覺分析
+    m = state["metrics"]
+    if not m or m.get("quality_score") is None or m.get("weighted_confidence", 0) == 0:
+        update_current_span(output={"skipped": True, "reason": "no_data"})
+        return {"narrative": "本期無財報資料，略過財務分析。"}
+
     try:
         from langchain_openai import ChatOpenAI  # type: ignore[import]
         from langchain_core.messages import HumanMessage  # type: ignore[import]
 
         meta: FinancialSnapshotWithMeta = state["snapshot"]  # type: ignore[assignment]
-        m = state["metrics"]
 
         prompt = (
             f"你是財報分析師助理。請根據以下已驗證指標，"

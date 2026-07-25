@@ -537,6 +537,7 @@ def _build_narrative(
     signal: Signal,
     hot_data_warning: bool,
     no_events: bool,
+    total_event_count: int = 0,
 ) -> str:
     """
     Build deterministic qualitative narrative.  NO numeric literals.
@@ -545,6 +546,13 @@ def _build_narrative(
     the narrative contains only categorical descriptions.
     """
     if no_events:
+        if total_event_count > 0:
+            # Events exist but none have consensus values to compute surprise
+            return (
+                f"本期共取得 {total_event_count} 個總經事件，"
+                "但均缺少市場共識預期值，無法計算驚喜度，訊號降級為中性。"
+                "可能原因：FRED 免費資料源無 consensus 欄位，或數據尚未公布。"
+            )
         return "近期無重大總經數據公布，總經面靜默，無方向性訊號。"
 
     parts: list[str] = []
@@ -730,7 +738,8 @@ def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
 
     # Narrative (fully deterministic — no LLM)
     narrative = _build_narrative(
-        details, score, signal, hot_warning, no_events
+        details, score, signal, hot_warning, no_events,
+        total_event_count=int(computed.get("event_count", 0)),
     )
     verifier_errors = _lf_check_narrative(narrative, {"macro_score": score})
     if verifier_errors:

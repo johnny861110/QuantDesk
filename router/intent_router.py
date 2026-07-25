@@ -46,19 +46,37 @@ from schemas.domain_report import RouterOutput
 
 _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使用者的金融分析需求並分類。
 
-## 三種場景
+## 五種查詢類型與對應 agents
 
-1. **single_stock**（單標的分析）
-   觸發條件：提到單一股票代號或名稱，詢問現況、走勢、值不值得買
-   例：「2330 現在怎樣」「台積電適合買嗎」「0050 的技術面」
+1. **stock_analysis**（個股技術/籌碼/新聞分析）
+   觸發：問技術面、K線、均線、籌碼、外資、新聞
+   例：「2330 技術面分析」「台積電外資動向」「聯發科最近有什麼消息」
+   agents: ["technical", "chip", "news"]
+   run_supervisor: false, run_debate: false
 
-2. **portfolio_risk**（組合風控）
-   觸發條件：提到選擇權部位、多口期貨、持倉組合的風險
-   例：「我有 10 口 TXO Call 850」「我的 delta 曝險多少」「我的選擇權組合要怎麼對沖」
+2. **investment_strategy**（投資建議 / 值不值得買）
+   觸發：問「適不適合買」「現在是買點嗎」「給我完整分析」「投資建議」
+   例：「台積電現在值得買嗎」「2330 完整分析」「幫我評估鴻海」
+   agents: ["technical", "chip", "news", "fundamental", "macro", "cross_market", "risk"]
+   run_supervisor: true, run_debate: true
 
-3. **multi_stock_scan**（多標的篩選）
-   觸發條件：掃描、找機會、比較多檔、某個產業或類股
-   例：「幫我掃金融股找機會」「技術面最強的半導體股」「哪幾檔最近外資在買」
+3. **fundamental_review**（財報/基本面分析）
+   觸發：問財報、EPS、ROE、毛利率、盈餘品質
+   例：「台積電的財報怎麼樣」「2330 這季 EPS 多少」「鴻海的毛利率趨勢」
+   agents: ["fundamental", "chip"]
+   run_supervisor: false, run_debate: false
+
+4. **macro_outlook**（總經/市場環境）
+   觸發：問利率、通膨、GDP、聯準會、美股、總體經濟、市場背景
+   例：「現在總經環境怎樣」「聯準會降息對台股影響」「美股最近走勢」
+   agents: ["macro", "cross_market"]
+   run_supervisor: false, run_debate: false
+
+5. **portfolio_risk**（組合風控/Greeks）
+   觸發：提到選擇權部位、期貨口數、delta/gamma/vega、對沖
+   例：「我有 10 口 TXO Call 850 九月到期」「我的 delta 曝險」「組合怎麼對沖」
+   agents: ["risk"]
+   run_supervisor: false, run_debate: false
 
 ## 輸出格式（JSON）
 
@@ -68,6 +86,10 @@ _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使
   "targets": ["2330"],
   "market": "TW",
   "depth": "standard",
+  "query_type": "stock_analysis",
+  "agents": ["technical", "chip", "news"],
+  "run_supervisor": false,
+  "run_debate": false,
   "extra_context": {}
 }
 ```
@@ -75,10 +97,9 @@ _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使
 ## 規則
 - targets：台股用 4 碼數字（不加 .TW），美股用 ticker（大寫）
 - market：TW / US / MIXED
-- depth：quick（純看技術面即可）/ standard（多 domain 分析）/ deep（完整研究）
-- portfolio_risk 場景：extra_context.positions 填使用者提到的部位描述
-- multi_stock_scan 場景：extra_context.sector 填產業，extra_context.criteria 填篩選條件
-- 不確定時 scenario 預設 single_stock，depth 預設 standard
+- depth：quick / standard / deep（不確定用 standard）
+- 不確定 query_type 時預設 stock_analysis
+- portfolio_risk 場景：extra_context.positions 填使用者描述的部位
 - 只輸出 JSON，不要有其他文字
 """
 
@@ -126,6 +147,28 @@ _SCAN_KEYWORDS = re.compile(
 )
 
 
+_QUERY_TYPE_AGENTS: dict[str, list[str]] = {
+    "stock_analysis":     ["technical", "chip", "news"],
+    "investment_strategy": ["technical", "chip", "news", "fundamental", "macro", "cross_market", "risk"],
+    "fundamental_review": ["fundamental", "chip"],
+    "macro_outlook":      ["macro", "cross_market"],
+    "portfolio_risk":     ["risk"],
+}
+
+_FUNDAMENTAL_KEYWORDS = re.compile(
+    r"(財報|EPS|ROE|毛利|盈餘|本益比|配息|股利|資產負債|現金流)",
+    re.IGNORECASE,
+)
+_MACRO_KEYWORDS = re.compile(
+    r"(總經|利率|通膨|CPI|GDP|聯準會|Fed|美股|降息|升息|殖利率|市場環境)",
+    re.IGNORECASE,
+)
+_STRATEGY_KEYWORDS = re.compile(
+    r"(值得買|適合買|買點|賣點|進場|出場|投資建議|完整分析|評估|看法)",
+    re.IGNORECASE,
+)
+
+
 def _regex_fallback(query: str) -> RouterOutput:
     """
     無 LLM 的規則式 fallback 分類。
@@ -135,23 +178,44 @@ def _regex_fallback(query: str) -> RouterOutput:
 
     if _PORTFOLIO_KEYWORDS.search(query):
         scenario = "portfolio_risk"
+        query_type = "portfolio_risk"
         targets = tickers or ["PORTFOLIO"]
     elif _SCAN_KEYWORDS.search(query) or len(tickers) > 1:
         scenario = "multi_stock_scan"
+        query_type = "stock_analysis"
         targets = tickers
+    elif _MACRO_KEYWORDS.search(query):
+        scenario = "single_stock"
+        query_type = "macro_outlook"
+        targets = tickers
+    elif _FUNDAMENTAL_KEYWORDS.search(query):
+        scenario = "single_stock"
+        query_type = "fundamental_review"
+        targets = [tickers[0]] if tickers else []
+    elif _STRATEGY_KEYWORDS.search(query):
+        scenario = "single_stock"
+        query_type = "investment_strategy"
+        targets = [tickers[0]] if tickers else []
     elif tickers:
         scenario = "single_stock"
+        query_type = "stock_analysis"
         targets = [tickers[0]]
     else:
         scenario = "single_stock"
+        query_type = "stock_analysis"
         targets = []
 
+    agents = _QUERY_TYPE_AGENTS[query_type]
     return RouterOutput(
         scenario=scenario,  # type: ignore[arg-type]
         targets=targets,
         market="TW",
         depth="standard",
         original_query=query,
+        query_type=query_type,  # type: ignore[arg-type]
+        agents=agents,
+        run_supervisor=query_type == "investment_strategy",
+        run_debate=query_type == "investment_strategy",
     )
 
 
@@ -177,6 +241,9 @@ def route(query: str) -> RouterOutput:
 
     try:
         raw = _llm_classify(query)
+        query_type = raw.get("query_type", "stock_analysis")
+        # Fallback agents if LLM didn't specify or gave unknown query_type
+        agents = raw.get("agents") or _QUERY_TYPE_AGENTS.get(query_type, _QUERY_TYPE_AGENTS["stock_analysis"])
         output = RouterOutput(
             scenario=raw.get("scenario", "single_stock"),  # type: ignore[arg-type]
             targets=raw.get("targets", []),
@@ -184,10 +251,16 @@ def route(query: str) -> RouterOutput:
             depth=raw.get("depth", "standard"),  # type: ignore[arg-type]
             original_query=query,
             extra_context=raw.get("extra_context", {}),
+            query_type=query_type,  # type: ignore[arg-type]
+            agents=agents,
+            run_supervisor=bool(raw.get("run_supervisor", query_type == "investment_strategy")),
+            run_debate=bool(raw.get("run_debate", query_type == "investment_strategy")),
         )
         update_current_span(output={
             "scenario": output.scenario,
             "targets": output.targets,
+            "query_type": output.query_type,
+            "agents": output.agents,
             "method": "llm",
         })
         return output

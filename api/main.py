@@ -225,6 +225,8 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                     "targets": router_out.targets,
                     "market": router_out.market,
                     "depth": router_out.depth,
+                    "query_type": getattr(router_out, "query_type", "stock_analysis"),
+                    "agents": getattr(router_out, "agents", []),
                     "method": "llm",
                 })
             except Exception as exc:  # noqa: BLE001
@@ -360,16 +362,32 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                     data_completeness=sig.data_quality.completeness,
                 )
 
-            # ── Step 3: Launch all agents in parallel ─────────────────────────
+            # ── Step 3: Launch selected agents in parallel ────────────────────
+            # Router specifies which agents to run via router_out.agents.
+            # Fallback to stock_analysis preset if Router didn't set agents.
+            from router.intent_router import _QUERY_TYPE_AGENTS  # noqa: PLC0415
+            active_agents: list[str] = (
+                getattr(router_out, "agents", None)
+                or _QUERY_TYPE_AGENTS["stock_analysis"]
+            )
+            run_supervisor: bool = getattr(router_out, "run_supervisor", True)
+            run_debate: bool = getattr(router_out, "run_debate", False)
+
+            _ALL_AGENT_BUILDERS: dict[str, Any] = {
+                "technical":    _technical,
+                "chip":         _chip,
+                "macro":        _macro,
+                "news":         _news,
+                "cross_market": _cross_market,
+                "fundamental":  _fundamental,
+                "risk":         _risk,
+            }
+
             queue: asyncio.Queue[_AgentQueueItem] = asyncio.Queue()
             agent_defs = [
-                ("technical",   _technical()),
-                ("chip",        _chip()),
-                ("macro",       _macro()),
-                ("news",        _news()),
-                ("cross_market", _cross_market()),
-                ("fundamental", _fundamental()),
-                ("risk",        _risk()),
+                (name, builder())
+                for name, builder in _ALL_AGENT_BUILDERS.items()
+                if name in active_agents
             ]
             n_agents = len(agent_defs)
             tasks = [
@@ -400,33 +418,45 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                 yield _sse("done", {})
                 return
 
-            # ── Step 4: Debate + Supervisor ───────────────────────────────────
+            # ── Step 4: Supervisor / Debate（依 Router 指示決定是否執行）────────
+            if not run_supervisor:
+                # stock_analysis / macro_outlook / fundamental_review 等不需要仲裁
+                yield _sse("done", {})
+                return
+
             yield _sse("debate_start", {})
             try:
                 from supervisor.graph import Supervisor  # noqa: PLC0415
 
-                sup_out, debate_out = await Supervisor().aggregate_debate(
-                    domain_reports=reports,
-                    symbol=symbol,
-                    scenario=getattr(router_out, "scenario", "single_stock"),
-                )
-
-                yield _sse("debate_bull", {
-                    "thesis": debate_out.bull.thesis,
-                    "key_points": debate_out.bull.key_points,
-                    "confidence": debate_out.bull.confidence,
-                })
-                yield _sse("debate_bear", {
-                    "thesis": debate_out.bear.thesis,
-                    "key_points": debate_out.bear.key_points,
-                    "confidence": debate_out.bear.confidence,
-                })
-                yield _sse("debate_pm", {
-                    "thesis": debate_out.pm_verdict.thesis,
-                    "key_points": debate_out.pm_verdict.key_points,
-                    "confidence": debate_out.pm_verdict.confidence,
-                    "signal": debate_out.final_signal.value,
-                })
+                if run_debate:
+                    sup_out, debate_out = await Supervisor().aggregate_debate(
+                        domain_reports=reports,
+                        symbol=symbol,
+                        scenario=getattr(router_out, "scenario", "single_stock"),
+                    )
+                    yield _sse("debate_bull", {
+                        "thesis": debate_out.bull.thesis,
+                        "key_points": debate_out.bull.key_points,
+                        "confidence": debate_out.bull.confidence,
+                    })
+                    yield _sse("debate_bear", {
+                        "thesis": debate_out.bear.thesis,
+                        "key_points": debate_out.bear.key_points,
+                        "confidence": debate_out.bear.confidence,
+                    })
+                    yield _sse("debate_pm", {
+                        "thesis": debate_out.pm_verdict.thesis,
+                        "key_points": debate_out.pm_verdict.key_points,
+                        "confidence": debate_out.pm_verdict.confidence,
+                        "signal": debate_out.final_signal.value,
+                    })
+                else:
+                    # Supervisor only, no debate
+                    from schemas.domain_report import domain_report_to_agent_signal  # noqa: PLC0415
+                    signals = [domain_report_to_agent_signal(r) for r in reports]
+                    sup_out = await asyncio.to_thread(
+                        Supervisor().aggregate, signals
+                    )
                 yield _sse("supervisor", _serialize_supervisor(sup_out))
 
             except Exception as exc:  # noqa: BLE001

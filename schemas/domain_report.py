@@ -119,6 +119,8 @@ class RouterOutput:
     Router LLM 的意圖分類輸出。
 
     scenario 決定後續呼叫哪些 agent、以何種模式執行。
+    query_type 精確描述分析類型，決定 agents / run_supervisor / run_debate。
+    agents 列表由 Router 產出，_stream_analysis 只啟動此清單內的 agent。
     """
     scenario: Literal["single_stock", "portfolio_risk", "multi_stock_scan"]
     targets: list[str]           # e.g. ["2330"] / ["PORTFOLIO"] / ["2882", "2881"]
@@ -126,6 +128,27 @@ class RouterOutput:
     depth: Literal["quick", "standard", "deep"] = "standard"
     original_query: str = ""
     extra_context: dict[str, Any] = field(default_factory=dict)
+
+    # ── 新增：查詢類型與 agent 路由 ──────────────────────────────────────────
+    query_type: Literal[
+        "stock_analysis",       # 個股技術/籌碼/新聞分析
+        "investment_strategy",  # 投資建議、值不值得買 → 全 agent + Debate
+        "fundamental_review",   # 財報、EPS、ROE → fundamental + chip
+        "macro_outlook",        # 總經、利率、通膨 → macro + cross_market
+        "portfolio_risk",       # 組合風控、Greeks → risk only
+    ] = "stock_analysis"
+
+    agents: list[str] = field(default_factory=list)
+    # 由 Router 指定要跑的 agent 清單，例如：
+    #   stock_analysis      → ["technical", "chip", "news"]
+    #   investment_strategy → ["technical", "chip", "news", "fundamental", "macro", "cross_market", "risk"]
+    #   fundamental_review  → ["fundamental", "chip"]
+    #   macro_outlook       → ["macro", "cross_market"]
+    #   portfolio_risk      → ["risk"]
+
+    run_supervisor: bool = True   # False → 各 agent 結果直接輸出，不做仲裁
+    run_debate: bool = False      # True → 執行 Bull/Bear/PM debate
+
     # extra_context 用途：
     #   portfolio_risk → {"positions": [...]}（使用者提供的部位 JSON）
     #   multi_stock_scan → {"sector": "financial", "criteria": "..."}
