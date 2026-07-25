@@ -1039,13 +1039,13 @@ class TestPPThresholdRouting:
         assert label == "miss"  # -0.1pp at exactly -0.10 threshold
 
     def test_gdp_uses_relative_pct_path(self) -> None:
-        """GDP Growth Rate is NOT in PP_THRESHOLD_CATEGORIES → relative % path."""
+        """GDP Growth Rate IS in PP_THRESHOLD_CATEGORIES (Phase 12) → pp path."""
         event = _make_event("GDP Growth Rate", actual=3.0, consensus=2.0)
         _, details = compute_macro_score([event], datetime.now(UTC))
         assert len(details) == 1
         _, _, surprise_metric, _, label = details[0]
-        # relative pct = (3.0 - 2.0) / 2.0 = 0.5 (50%)
-        assert surprise_metric == pytest.approx(0.5, abs=1e-6)
+        # pp diff = 3.0 - 2.0 = 1.0pp → large_beat (≥ 0.30pp)
+        assert surprise_metric == pytest.approx(1.0, abs=1e-6)
         assert label == "large_beat"
 
     def test_nfp_uses_relative_pct_path(self) -> None:
@@ -1062,10 +1062,11 @@ class TestPPThresholdRouting:
         for cat in PP_THRESHOLD_CATEGORIES:
             assert cat in CATEGORY_DIRECTION, f"{cat} missing from CATEGORY_DIRECTION"
 
-    def test_pp_threshold_categories_all_negative_direction(self) -> None:
-        """All PP_THRESHOLD_CATEGORIES are inflation-type: direction should be -1."""
+    def test_pp_threshold_categories_all_have_direction(self) -> None:
+        """All PP_THRESHOLD_CATEGORIES must have a CATEGORY_DIRECTION entry."""
+        # After Phase 12, PP categories include both inflation (-1) and growth (+1) types.
         for cat in PP_THRESHOLD_CATEGORIES:
-            assert CATEGORY_DIRECTION[cat] == -1, f"{cat} should have direction -1"
+            assert cat in CATEGORY_DIRECTION, f"{cat} missing from CATEGORY_DIRECTION"
 
     def test_label_in_details_matches_expected_pp_classifier(self) -> None:
         """
@@ -1101,13 +1102,29 @@ class TestPPThresholdRouting:
         assert summaries[0]["surprise_metric_type"] == "pp"
         assert summaries[0]["surprise_metric"] == pytest.approx(0.1, abs=1e-9)
 
-    def test_pipeline_gdp_event_summaries_have_pct_type(self) -> None:
-        """GDP should have surprise_metric_type='pct' in event_summaries."""
+    def test_pipeline_gdp_event_summaries_have_pp_type(self) -> None:
+        """GDP should have surprise_metric_type='pp' in event_summaries (Phase 12)."""
         event = _make_event("GDP Growth Rate", actual=3.0, consensus=2.0)
         sig = run_macro_agent(macro_adapter=_make_mock_adapter([event]))
         summaries = sig.metrics.get("event_summaries", [])
         assert len(summaries) == 1
-        assert summaries[0]["surprise_metric_type"] == "pct"
+        assert summaries[0]["surprise_metric_type"] == "pp"
+
+    def test_gdp_low_base_pp_not_inflated(self) -> None:
+        """GDP 0.5% vs 0.55%: 0.05pp should be 'in_line', not distorted by low base."""
+        event = _make_event("GDP Growth Rate", actual=0.55, consensus=0.5)
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        _, _, surprise_metric, _, label = details[0]
+        assert surprise_metric == pytest.approx(0.05, abs=1e-6)
+        assert label == "in_line"  # 0.05pp < 0.10pp threshold
+
+    def test_unemployment_pp_surprise(self) -> None:
+        """Unemployment 3.5→3.7: 0.2pp should be 'beat' (≥0.10, <0.30)."""
+        event = _make_event("Unemployment Rate", actual=3.7, consensus=3.5)
+        _, details = compute_macro_score([event], datetime.now(UTC))
+        _, _, surprise_metric, _, label = details[0]
+        assert surprise_metric == pytest.approx(0.2, abs=1e-6)
+        assert label == "beat"
 
 
 # ─── Import from macro_agent private constant ─────────────────────────────────

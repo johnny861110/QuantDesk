@@ -47,6 +47,7 @@ from typing import Any, Final, Optional, TypedDict
 from langgraph.graph import END, StateGraph
 
 from adapters.base import DataSourceAdapter
+from adapters.options_adapter import FinMindOptionsAdapter, OptionRecord
 from adapters.price_adapter import FinMindPriceAdapter
 from agents.verifier import check_narrative
 from agents.risk.aggregation import AggregationResult, aggregate
@@ -166,6 +167,8 @@ class RiskAgentState(TypedDict):
     # intermediates
     portfolio_cfg: Optional[PortfolioConfig]
     usdtwd: Optional[float]
+    iv_map: dict[tuple[float, str, str], float]  # (strike, option_type, expiry_iso) → IV
+    iv_sources: dict[int, str]  # pos_idx → "finmind_backed_out" | "placeholder_0.20"
     greeks_map: dict[int, GreeksResult]
     twd_spot_map: dict[str, float]
     agg_result: Optional[AggregationResult]
@@ -244,6 +247,68 @@ def _node_load(state: RiskAgentState) -> RiskAgentState:
     return {**state, "portfolio_cfg": cfg, "pipeline_errors": errors}
 
 
+@observe(name="risk_agent:node_fetch_iv")  # type: ignore[misc]
+def _node_fetch_iv(state: RiskAgentState) -> RiskAgentState:
+    """
+    Fetch backed-out IV from FinMind TaiwanOptionDaily for TXO positions.
+
+    Builds iv_map: {(strike, option_type, expiry_iso) → IV} so _node_price
+    can look up real IV instead of using PLACEHOLDER_IV.
+
+    Non-TXO options (e.g. AAPL) are skipped — FinMind only has Taiwan options.
+    Any failure degrades gracefully: iv_map stays empty and _node_price falls
+    back to PLACEHOLDER_IV as before.
+    """
+    cfg = state["portfolio_cfg"]
+    errors = list(state["pipeline_errors"])
+    iv_map: dict[tuple[float, str, str], float] = {}
+
+    if cfg is None:
+        update_current_span(output={"iv_fetched": 0, "reason": "no_portfolio"})
+        return {**state, "iv_map": iv_map}
+
+    # Check if any TXO option positions exist
+    txo_options = [
+        p for p in cfg.positions
+        if p.is_option and p.is_valid and p.symbol == "TXO"
+    ]
+    if not txo_options:
+        update_current_span(output={"iv_fetched": 0, "reason": "no_txo_options"})
+        return {**state, "iv_map": iv_map}
+
+    # Get TXO spot price for IV backing-out
+    spot_price = state["spot_map"].get("TXO", 0.0)
+    if spot_price <= 0:
+        errors.append("[fetch_iv] TXO spot price unavailable, cannot back out IV")
+        update_current_span(output={"iv_fetched": 0, "error": "no_txo_spot"})
+        return {**state, "iv_map": iv_map, "pipeline_errors": errors}
+
+    try:
+        import os  # noqa: PLC0415
+        token = os.environ.get("FINMIND_KEY", "")
+        adapter = FinMindOptionsAdapter(api_token=token)
+        as_of = state["asof"].date()
+
+        sourced = adapter.fetch(stock_id="TXO", as_of=as_of, spot_price=spot_price)
+        records: list[OptionRecord] = sourced.payload
+
+        for rec in records:
+            if rec.iv_available:
+                key = (rec.strike, rec.option_type, rec.expiry.isoformat())
+                iv_map[key] = rec.iv
+
+        update_current_span(output={
+            "iv_fetched": len(iv_map),
+            "iv_total_records": len(records),
+            "iv_unavailable": sum(1 for r in records if not r.iv_available),
+        })
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"[fetch_iv] FinMind IV fetch failed, using placeholder: {exc}")
+        update_current_span(output={"iv_fetched": 0, "error": str(exc)[:80]})
+
+    return {**state, "iv_map": iv_map, "pipeline_errors": errors}
+
+
 @observe(name="risk_agent:node_fetch_fx")  # type: ignore[misc]
 def _node_fetch_fx(state: RiskAgentState) -> RiskAgentState:
     """Fetch USDTWD.  Degrades gracefully (usdtwd=None) if adapter absent."""
@@ -266,7 +331,11 @@ def _node_fetch_fx(state: RiskAgentState) -> RiskAgentState:
 @observe(name="risk_agent:node_price")  # type: ignore[misc]
 def _node_price(state: RiskAgentState) -> RiskAgentState:
     """
-    Price all valid option legs with placeholder IV.
+    Price all valid option legs, preferring real IV from iv_map.
+
+    IV lookup: for TXO positions, look up (strike, option_type, expiry) in
+    iv_map (populated by _node_fetch_iv from FinMind).  If found, use real IV;
+    otherwise fall back to PLACEHOLDER_IV.
 
     USD spot/strike are pre-converted to TWD (caller contract for pricing_router
     and aggregation.py: γ_TWD = γ_USD/fx, not × fx).  twd_spot_map is built
@@ -278,6 +347,7 @@ def _node_price(state: RiskAgentState) -> RiskAgentState:
 
     positions = cfg.positions
     spot_map  = state["spot_map"]
+    iv_map    = state["iv_map"]
     usdtwd    = state["usdtwd"]
     today     = state["asof"].date()
     errors    = list(state["pipeline_errors"])
@@ -297,6 +367,8 @@ def _node_price(state: RiskAgentState) -> RiskAgentState:
             twd_spot_map[sym] = px
 
     greeks_map: dict[int, GreeksResult] = {}
+    # Track IV source per position for accurate confidence penalty
+    iv_sources: dict[int, str] = {}
 
     for pos_idx, pos in enumerate(positions):
         if not pos.is_option or not pos.is_valid:
@@ -328,11 +400,21 @@ def _node_price(state: RiskAgentState) -> RiskAgentState:
             spot_twd   = spot_orig
             strike_twd = pos.strike
 
+        # Look up real IV from iv_map (backed out by _node_fetch_iv)
+        iv_key = (pos.strike, pos.option_type, expiry_date.isoformat())
+        real_iv = iv_map.get(iv_key)
+        if real_iv is not None:
+            sigma = real_iv
+            iv_sources[pos_idx] = "finmind_backed_out"
+        else:
+            sigma = PLACEHOLDER_IV
+            iv_sources[pos_idx] = "placeholder_0.20"
+
         spec = OptionSpec(
             S=spot_twd, K=strike_twd, T=T,
             r=DEFAULT_RISK_FREE_RATE,
             q=DEFAULT_DIVIDEND_YIELD,
-            sigma=PLACEHOLDER_IV,
+            sigma=sigma,
             option_type=pos.option_type,
             style=pos.style,
             spot_currency="TWD",
@@ -343,15 +425,19 @@ def _node_price(state: RiskAgentState) -> RiskAgentState:
             errors.append(f"[{pos_idx}] {pos.symbol}: pricing error: {exc}")
 
     n_opt = sum(1 for p in cfg.positions if p.is_option and p.is_valid)
+    n_real_iv = sum(1 for s in iv_sources.values() if s == "finmind_backed_out")
+    n_placeholder = sum(1 for s in iv_sources.values() if s == "placeholder_0.20")
     update_current_span(output={
         "options_total": n_opt,
         "options_priced": len(greeks_map),
-        "iv_missing_count": n_opt - len(greeks_map),
+        "iv_real": n_real_iv,
+        "iv_placeholder": n_placeholder,
         "price_errors": len(errors) - len(state["pipeline_errors"]),
     })
     return {
         **state,
         "greeks_map": greeks_map,
+        "iv_sources": iv_sources,
         "twd_spot_map": twd_spot_map,
         "pipeline_errors": errors,
     }
@@ -430,6 +516,7 @@ def _node_signal(state: RiskAgentState) -> RiskAgentState:
         signal = build_risk_signal(
             positions     = cfg.positions,
             greeks_map    = state["greeks_map"],
+            iv_sources    = state["iv_sources"],
             agg_result    = agg,
             scenario_result = sc,
             portfolio_nav = cfg.portfolio_nav,
@@ -450,6 +537,7 @@ def build_risk_signal(
     portfolio_nav: float,
     asof: datetime,
     errors: list[str] | None = None,
+    iv_sources: dict[int, str] | None = None,
 ) -> AgentSignal:
     """
     Assemble AgentSignal from pre-computed Greeks, aggregation, and scenarios.
@@ -522,7 +610,7 @@ def build_risk_signal(
         "positions_count":          len(positions),
         "options_total":            n_options,
         "options_priced":           n_priced,
-        "iv_source":                "placeholder_0.20",   # tech-debt Phase 4
+        "iv_source":                _summarize_iv_sources(iv_sources or {}),
         "consolidation_complete":   c.is_complete,
         "excluded_currencies":      c.excluded_currencies,
         "portfolio_nav":            portfolio_nav,
@@ -564,13 +652,21 @@ def build_risk_signal(
         ),
     ]
 
-    # ── IV missing count ──────────────────────────────────────────────────────
-    iv_missing_count = n_options - n_priced
+    # ── IV missing count (only count options that used placeholder IV) ────────
+    eff_iv_sources = iv_sources or {}
+    n_placeholder_iv = sum(
+        1 for idx in range(len(positions))
+        if positions[idx].is_option and positions[idx].is_valid
+        and idx in greeks_map
+        and eff_iv_sources.get(idx) == "placeholder_0.20"
+    )
+    iv_missing_count = (n_options - n_priced) + n_placeholder_iv
     metrics["iv_missing_count"] = iv_missing_count
+    metrics["iv_real_count"] = n_priced - n_placeholder_iv if n_priced > n_placeholder_iv else 0
 
     # ── Signal and confidence ─────────────────────────────────────────────────
     signal     = _determine_signal(net_delta_pct_nav)
-    confidence = _compute_confidence(agg_result, positions, greeks_map)
+    confidence = _compute_confidence(agg_result, positions, greeks_map, eff_iv_sources)
 
     # ── Hard constraint annotation for partial IV missing ─────────────────────
     # Follow FX-exclusion pattern from aggregation.py: append note to detail.
@@ -655,20 +751,23 @@ def _compute_confidence(
     agg_result: AggregationResult,
     positions: list[Position],
     greeks_map: dict[int, GreeksResult],
+    iv_sources: dict[int, str] | None = None,
 ) -> float:
     """
     Start at 1.0; reduce for data gaps.
 
     −0.20                   : FX missing → USD exposure excluded from consolidated_twd
     −0.10                   : any invalid position (bad schema / expired option)
-    −_IV_MISSING_CONFIDENCE_PENALTY × missing_fraction: proportional IV penalty（⚠️ 暫定值）
+    −_IV_MISSING_CONFIDENCE_PENALTY × missing_fraction: proportional IV penalty
+                              missing_fraction = (unpriced + placeholder_iv) / total
+                              Options with real IV from FinMind are NOT penalized.
                               complete failure (0 priced):   −0.30
                               partial failure (k/n priced):  −0.30 × (1 − k/n)
-                              all priced:                     0
-                              連續線性：部分→完全失敗無跳動。
+                              all priced with real IV:        0
     Minimum: 0.10
     """
     conf = 1.0
+    eff_iv_sources = iv_sources or {}
 
     if agg_result.consolidated_twd.excluded_currencies:
         conf -= 0.20
@@ -683,15 +782,37 @@ def _compute_confidence(
             1 for idx, p in enumerate(positions)
             if p.is_option and p.is_valid and idx in greeks_map
         )
-        # 線性比例懲罰：missing_fraction × _IV_MISSING_CONFIDENCE_PENALTY（暫定 0.30）
-        # 單一公式覆蓋全範圍，確保部分失敗→完全失敗之間無不連續跳動：
-        #   missing_fraction=0.0 (all priced) → penalty=0.00
-        #   missing_fraction=0.5 (half priced)→ penalty=0.15
-        #   missing_fraction=1.0 (none priced)→ penalty=0.30
-        missing_fraction = 1.0 - n_priced_conf / n_options_conf
+        if eff_iv_sources:
+            # New behavior: only options with real IV are penalty-free
+            n_with_real_iv = sum(
+                1 for idx, p in enumerate(positions)
+                if p.is_option and p.is_valid
+                and idx in greeks_map
+                and eff_iv_sources.get(idx) == "finmind_backed_out"
+            )
+            missing_fraction = 1.0 - n_with_real_iv / n_options_conf
+        else:
+            # Legacy: no iv_sources → penalize only unpriced options
+            missing_fraction = 1.0 - n_priced_conf / n_options_conf
         conf -= _IV_MISSING_CONFIDENCE_PENALTY * missing_fraction
 
     return max(0.10, conf)
+
+
+def _summarize_iv_sources(iv_sources: dict[int, str]) -> str:
+    """Summarize IV source distribution for metrics reporting."""
+    if not iv_sources:
+        return "placeholder_0.20"
+    n_real = sum(1 for v in iv_sources.values() if v == "finmind_backed_out")
+    n_placeholder = sum(1 for v in iv_sources.values() if v == "placeholder_0.20")
+    total = n_real + n_placeholder
+    if total == 0:
+        return "none"
+    if n_real == total:
+        return f"finmind_backed_out: {n_real}/{total}"
+    if n_placeholder == total:
+        return f"placeholder_0.20: {n_placeholder}/{total}"
+    return f"finmind: {n_real}/{total}, placeholder: {n_placeholder}/{total}"
 
 
 def _build_narrative(
@@ -732,10 +853,13 @@ def _build_narrative(
             "未納入情境壓力測試（Phase 3 補 rolling-beta 後補入）。"
         )
 
-    parts.append(
-        "IV 來源：placeholder（Phase Four FinMind 接入後替換）。"
-        "數值詳見 metrics 及 key_evidence。"
-    )
+    iv_source_str = str(metrics.get("iv_source", ""))
+    if "finmind" in iv_source_str and "placeholder" in iv_source_str:
+        parts.append("IV 來源：部分來自 FinMind 反推，其餘使用 placeholder。數值詳見 metrics 及 key_evidence。")
+    elif "finmind" in iv_source_str:
+        parts.append("IV 來源：FinMind 反推（TaiwanOptionDaily）。數值詳見 metrics 及 key_evidence。")
+    else:
+        parts.append("IV 來源：placeholder。數值詳見 metrics 及 key_evidence。")
 
     return " ".join(parts)
 
@@ -793,6 +917,8 @@ def run_risk_agent(
         "days_held":       days_held,
         "portfolio_cfg":   None,
         "usdtwd":          None,
+        "iv_map":          {},
+        "iv_sources":      {},
         "greeks_map":      {},
         "twd_spot_map":    {},
         "agg_result":      None,
@@ -803,6 +929,7 @@ def run_risk_agent(
 
     state = _node_fetch_live_spots(state)  # 先取真實現貨價（盡力而為）
     state = _node_load(state)
+    state = _node_fetch_iv(state)  # 從 FinMind 取 TXO 反推 IV
     state = _node_fetch_fx(state)
     state = _node_price(state)
     state = _node_aggregate(state)
@@ -836,6 +963,7 @@ def create_risk_graph() -> Any:
 
     builder.add_node("fetch_live_spots", _node_fetch_live_spots)
     builder.add_node("load",             _node_load)
+    builder.add_node("fetch_iv",         _node_fetch_iv)
     builder.add_node("fetch_fx",         _node_fetch_fx)
     builder.add_node("price",            _node_price)
     builder.add_node("aggregate",        _node_aggregate)
@@ -844,7 +972,8 @@ def create_risk_graph() -> Any:
 
     builder.set_entry_point("fetch_live_spots")
     builder.add_edge("fetch_live_spots", "load")
-    builder.add_edge("load",             "fetch_fx")
+    builder.add_edge("load",             "fetch_iv")
+    builder.add_edge("fetch_iv",         "fetch_fx")
     builder.add_edge("fetch_fx",         "price")
     builder.add_edge("price",     "aggregate")
     builder.add_edge("aggregate", "scenario")

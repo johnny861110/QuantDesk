@@ -32,12 +32,15 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from adapters.base import MacroAdapter, SourcedData
 from adapters.macro_adapter import MacroEvent, MacroResult
+
+logger = logging.getLogger(__name__)
 
 # ─── FRED 系列代碼地圖 ────────────────────────────────────────────────────────
 
@@ -211,10 +214,14 @@ class FREDAdapter(MacroAdapter):
                             release_date=dt,
                             source_name="finmind",
                         ))
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError) as exc:
+                        logger.debug("FinMind row parse error for '%s': %s", label, exc)
                         continue
-            except Exception:  # noqa: BLE001
-                # 任何錯誤（timeout, 無 key 等）靜默跳過，不影響 FRED 資料
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "FinMind Taiwan series '%s' fetch failed: %s",
+                    label, str(exc)[:120],
+                )
                 continue
 
         return events
