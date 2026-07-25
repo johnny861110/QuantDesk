@@ -88,6 +88,19 @@ def _serialize_supervisor(output: Any) -> dict[str, Any]:
             "evidence_confidence": result.evidence_confidence,
             "agents": [a.value for a, _, _ in result.contributing_agents],
         }
+    # Serialize individual hard constraint details for frontend display
+    hc_details = []
+    for agent, hc in output.hard_constraint_breaches + output.unverifiable_constraints:
+        hc_details.append({
+            "agent": agent.value,
+            "type": hc.type,
+            "current": hc.current,
+            "limit": hc.limit,
+            "breached": hc.breached,
+            "verifiable": hc.verifiable,
+            "detail": hc.detail,
+        })
+
     return {
         "signal": output.overall_recommendation.value,
         "confidence": output.confidence,
@@ -97,6 +110,7 @@ def _serialize_supervisor(output: Any) -> dict[str, Any]:
         "mandatory_warnings": output.mandatory_warnings,
         "review_reasons": output.review_reasons,
         "horizon_breakdown": horizon,
+        "hard_constraint_details": hc_details,
     }
 
 

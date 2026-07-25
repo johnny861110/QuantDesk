@@ -89,6 +89,41 @@ export function SupervisorCard({ data }: Props) {
         </div>
       )}
 
+      {/* Hard constraint details table */}
+      {data.hard_constraint_details && data.hard_constraint_details.length > 0 && (
+        <div className="mb-3 rounded-lg border border-gray-700 bg-gray-900/60 p-3">
+          <p className="text-xs font-semibold text-gray-400 mb-2">風控約束明細</p>
+          <div className="space-y-2">
+            {data.hard_constraint_details.map((hc, i) => {
+              const ratio = hc.limit !== 0 ? Math.abs(hc.current / hc.limit) : 0
+              const barPct = Math.min(100, ratio * 100)
+              const isBreached = hc.breached
+              const barColor = isBreached ? 'bg-red-500' : barPct > 80 ? 'bg-yellow-500' : 'bg-green-500'
+              const borderColor = isBreached ? 'border-red-700' : !hc.verifiable ? 'border-orange-700' : 'border-gray-700'
+              return (
+                <div key={i} className={`rounded-md border ${borderColor} bg-gray-800/50 px-3 py-2`}>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="text-gray-300 font-medium">{hc.type}</span>
+                    <span className={`font-mono ${isBreached ? 'text-red-400' : 'text-gray-400'}`}>
+                      {hc.current.toFixed(4)} / {hc.limit.toFixed(4)}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-700">
+                    <div
+                      className={`h-1.5 rounded-full transition-all duration-500 ${barColor}`}
+                      style={{ width: `${barPct}%` }}
+                    />
+                  </div>
+                  {!hc.verifiable && (
+                    <p className="text-[10px] text-orange-400 mt-1">⚠ 未驗證（IV 部分缺失）</p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {data.requires_human_review && (
         <div className="mb-3 rounded-lg border border-orange-600 bg-orange-900/30 px-4 py-3">
           <div className="flex items-center gap-2 mb-1">

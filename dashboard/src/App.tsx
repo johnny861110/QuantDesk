@@ -1,10 +1,12 @@
-import { useState, useRef, type KeyboardEvent } from 'react'
+import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
 import { useAnalysis } from './hooks/useAnalysis'
+import { useQueryHistory } from './hooks/useQueryHistory'
 import { RouterCard } from './components/RouterCard'
 import { AgentCard } from './components/AgentCard'
 import { DebatePanel } from './components/DebatePanel'
 import { SupervisorCard } from './components/SupervisorCard'
 import { PipelineProgress } from './components/PipelineProgress'
+import type { Signal } from './types'
 
 const EXAMPLE_QUERIES = [
   { text: '2330 現在怎樣', hint: '單標的綜合分析' },
@@ -21,14 +23,43 @@ const STATUS_COLOR: Record<string, string> = {
 
 export default function App() {
   const [query, setQuery] = useState('')
+  const [showHistory, setShowHistory] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const { state, analyze, reset } = useAnalysis()
+  const { state, analyze, reset, retry } = useAnalysis()
+  const { history, addQuery, clearHistory } = useQueryHistory()
 
   const handleSubmit = () => {
     const q = query.trim()
     if (!q || state.status === 'streaming') return
     analyze(q)
   }
+
+  // Record completed analysis in history
+  const prevStatusRef = useRef(state.status)
+  if (prevStatusRef.current === 'streaming' && state.status === 'done') {
+    const sig = state.supervisor?.signal as Signal | undefined
+    addQuery(query, sig)
+  }
+  prevStatusRef.current = state.status
+
+  const exportJson = useCallback(() => {
+    const data = {
+      query,
+      timestamp: new Date().toISOString(),
+      router: state.router,
+      agents: state.agents,
+      debate: state.debate,
+      supervisor: state.supervisor,
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const target = state.router?.targets?.[0] ?? 'analysis'
+    a.download = `quantdesk-${target}-${new Date().toISOString().slice(0, 10)}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [query, state])
 
   const handleKey = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') handleSubmit()
@@ -113,19 +144,55 @@ export default function App() {
             </button>
           </div>
 
-          {/* Example queries */}
+          {/* Example queries + history */}
           {state.status === 'idle' && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {EXAMPLE_QUERIES.map(({ text: q, hint }) => (
-                <button
-                  key={q}
-                  onClick={() => { setQuery(q); setTimeout(() => inputRef.current?.focus(), 0) }}
-                  className="group flex items-center gap-1.5 rounded-full border border-gray-700 bg-gray-800/60 px-3 py-1.5 text-xs text-gray-300 transition-all hover:border-blue-600 hover:bg-blue-900/20 hover:text-blue-300"
-                >
-                  <span>{q}</span>
-                  <span className="text-gray-600 group-hover:text-blue-500/60">· {hint}</span>
-                </button>
-              ))}
+            <div className="mt-3 space-y-2">
+              <div className="flex flex-wrap gap-2">
+                {EXAMPLE_QUERIES.map(({ text: q, hint }) => (
+                  <button
+                    key={q}
+                    onClick={() => { setQuery(q); setTimeout(() => inputRef.current?.focus(), 0) }}
+                    className="group flex items-center gap-1.5 rounded-full border border-gray-700 bg-gray-800/60 px-3 py-1.5 text-xs text-gray-300 transition-all hover:border-blue-600 hover:bg-blue-900/20 hover:text-blue-300"
+                  >
+                    <span>{q}</span>
+                    <span className="text-gray-600 group-hover:text-blue-500/60">· {hint}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Query history */}
+              {history.length > 0 && (
+                <div>
+                  <button
+                    onClick={() => setShowHistory(v => !v)}
+                    className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
+                  >
+                    {showHistory ? '▾' : '▸'} 最近查詢 ({history.length})
+                  </button>
+                  {showHistory && (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {history.slice(0, 10).map((h, i) => (
+                        <button
+                          key={i}
+                          onClick={() => { setQuery(h.query); setTimeout(() => inputRef.current?.focus(), 0) }}
+                          className="flex items-center gap-1 rounded-full border border-gray-800 bg-gray-900/60 px-2.5 py-1 text-xs text-gray-400 hover:border-gray-600 hover:text-gray-200 transition-colors"
+                        >
+                          {h.signal && (
+                            <span className={h.signal === 'bullish' ? 'text-green-500' : h.signal === 'bearish' ? 'text-red-500' : 'text-yellow-500'}>●</span>
+                          )}
+                          <span className="truncate max-w-[140px]">{h.query}</span>
+                        </button>
+                      ))}
+                      <button
+                        onClick={clearHistory}
+                        className="text-[10px] text-gray-700 hover:text-gray-500 ml-1"
+                      >
+                        清除
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -136,9 +203,17 @@ export default function App() {
         {/* ── Error ────────────────────────────────────── */}
         {state.status === 'error' && state.error && (
           <div className="animate-fade-in rounded-xl border border-red-700 bg-red-900/20 p-4">
-            <div className="flex items-center gap-2 text-red-300">
-              <span className="text-lg">✗</span>
-              <span className="text-sm font-medium">{state.error}</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-red-300">
+                <span className="text-lg">✗</span>
+                <span className="text-sm font-medium">{state.error}</span>
+              </div>
+              <button
+                onClick={retry}
+                className="rounded-lg border border-red-700 px-3 py-1.5 text-xs font-medium text-red-400 transition-colors hover:bg-red-900/40 hover:text-red-300"
+              >
+                重試
+              </button>
             </div>
           </div>
         )}
@@ -196,7 +271,7 @@ export default function App() {
 
         {/* ── Done footer ───────────────────────────────── */}
         {state.status === 'done' && (
-          <div className="py-4 text-center space-y-1">
+          <div className="py-4 text-center space-y-2">
             <p className="text-xs text-gray-500 flex items-center justify-center gap-2">
               <span className="text-green-500">✓</span>
               分析完成
@@ -204,9 +279,20 @@ export default function App() {
                 <span className="text-gray-600">· 耗時 {(state.elapsedMs / 1000).toFixed(1)}s</span>
               )}
             </p>
-            <p className="text-xs text-gray-700">
-              Router → Domain Agents → Multi-agent Debate → Supervisor
-            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={retry}
+                className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-400 transition-colors hover:border-blue-600 hover:text-blue-400"
+              >
+                重新分析
+              </button>
+              <button
+                onClick={exportJson}
+                className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-400 transition-colors hover:border-green-600 hover:text-green-400"
+              >
+                匯出 JSON
+              </button>
+            </div>
             <p className="text-xs text-gray-800">
               LangGraph + GPT-4o · 確定性規則引擎 + LLM 仲裁
             </p>

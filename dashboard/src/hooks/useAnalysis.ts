@@ -42,7 +42,7 @@ function handleEvent(
     case 'agent_done':
       return {
         ...state,
-        agents: { ...state.agents, [payload.agent]: { ...payload, loading: false } },
+        agents: { ...state.agents, [payload.agent]: { ...payload, loading: false, receivedAt: Date.now() } },
         currentEvent: `${payload.agent} 完成 (${payload.signal})`,
       }
 
@@ -121,8 +121,10 @@ export function useAnalysis() {
   const [state, setState] = useState<AnalysisState>(INITIAL_STATE)
   const esRef = useRef<EventSource | null>(null)
   const startedAtRef = useRef<number>(0)
+  const lastQueryRef = useRef<string>('')
 
   const analyze = useCallback((query: string) => {
+    lastQueryRef.current = query
     // Close any existing connection
     if (esRef.current) {
       esRef.current.close()
@@ -170,5 +172,9 @@ export function useAnalysis() {
     setState(INITIAL_STATE)
   }, [])
 
-  return { state, analyze, reset }
+  const retry = useCallback(() => {
+    if (lastQueryRef.current) analyze(lastQueryRef.current)
+  }, [analyze])
+
+  return { state, analyze, reset, retry, lastQuery: lastQueryRef }
 }
