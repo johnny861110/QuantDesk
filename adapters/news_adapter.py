@@ -291,15 +291,23 @@ class RSSNewsAdapter(NewsAdapter):
 
     def _fetch_raw(self, feed_url: str) -> Any:
         """Fetch RSS feed and return feedparser result. Override in tests."""
+        import warnings  # noqa: PLC0415
+
         import feedparser  # type: ignore[import-untyped]
         import requests  # noqa: PLC0415
+        import urllib3  # noqa: PLC0415
 
         try:
-            resp = requests.get(
-                feed_url, timeout=10,
-                verify=False,   # some TW financial sites have non-standard certs
-                headers={"User-Agent": "Mozilla/5.0 (compatible; QuantDesk/1.0)"},
-            )
+            # verify=False is intentional: some TW/Google financial RSS endpoints
+            # have certificate issues in certain environments (e.g. WSL2).
+            # Suppress the InsecureRequestWarning so logs stay clean.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                resp = requests.get(
+                    feed_url, timeout=10,
+                    verify=False,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; QuantDesk/1.0)"},
+                )
             resp.raise_for_status()
             return feedparser.parse(resp.content)
         except Exception:
