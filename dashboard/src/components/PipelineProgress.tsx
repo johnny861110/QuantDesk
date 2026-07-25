@@ -15,6 +15,7 @@ const AGENT_STAGES: Stage[] = [
   { id: 'news',        label: '新聞',   icon: '📰' },
   { id: 'cross_market',label: '跨市場', icon: '🔗' },
   { id: 'fundamental', label: '基本面', icon: '📋' },
+  { id: 'risk',        label: '風控',   icon: '🛡️' },
 ]
 
 // Synthesis stages (row 2)
@@ -37,7 +38,8 @@ function getStageStatus(stageId: string, state: AnalysisState): StageStatus {
     case 'macro':
     case 'news':
     case 'cross_market':
-    case 'fundamental': {
+    case 'fundamental':
+    case 'risk': {
       const agent = state.agents[stageId]
       if (!agent) return 'idle'
       if (agent.failed) return 'failed'

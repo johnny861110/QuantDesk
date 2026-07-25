@@ -652,10 +652,12 @@ def _node_build_signal(state: NewsAgentState) -> NewsAgentState:
     else:
         staleness = 0.0
 
-    completeness = min(1.0, len(dedup_items) / 5.0)  # 5 items = "full coverage"
-    # Downgrade completeness when LLM failed (analysis is incomplete)
+    # Adapters ran successfully (this node executed): give at least 0.1 so UI
+    # shows the system worked even when no articles are available this period.
+    completeness = max(0.1, min(1.0, len(dedup_items) / 5.0))
+    # Downgrade completeness when LLM failed (sentiment analysis incomplete)
     if llm_failed:
-        completeness *= 0.0  # no usable analysis
+        completeness *= 0.5  # reduce but keep adapter-availability signal
 
     metrics: dict[str, Any] = {
         "raw_article_count":   len(raw_items),

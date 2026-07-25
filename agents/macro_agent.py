@@ -747,9 +747,16 @@ def _node_build_signal(state: MacroAgentState) -> MacroAgentState:
         )
 
     # Data quality
-    completeness = 0.0 if no_events else min(1.0, computed.get("computable_count", 0) / 3.0)
-    if degraded:
+    # Degraded (FRED) mode: no consensus → computable_count always 0, but
+    # events WERE fetched.  Give partial credit so completeness ≠ 0.
+    event_count_val = int(computed.get("event_count", 0))
+    computable_val = int(computed.get("computable_count", 0))
+    if no_events:
         completeness = 0.0
+    elif degraded:
+        completeness = min(0.5, event_count_val / 10.0)  # max 50% — data exists, no consensus
+    else:
+        completeness = min(1.0, computable_val / 3.0)
     staleness_sec = 0.0
     if details:
         oldest = min(e.release_date for (e, _, _, _, _) in details)

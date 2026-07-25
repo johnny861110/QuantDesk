@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
@@ -51,10 +52,19 @@ app.add_middleware(
 
 
 def _safe_val(v: Any) -> Any:
-    """把 key_findings 裡的值轉成 JSON 安全型別。"""
-    if isinstance(v, (int, float, str, bool)) or v is None:
+    """把 key_findings 裡的值轉成 JSON 安全型別。含 numpy 純量處理。"""
+    if v is None:
         return v
-    return str(v)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float, str)):
+        return v
+    # numpy scalar (np.float64, np.int64 …) — convert to Python native
+    try:
+        f = float(v)
+        return int(f) if f == int(f) and abs(f) < 2**53 else f
+    except (TypeError, ValueError):
+        return str(v)
 
 
 def _serialize_agent(report: Any) -> dict[str, Any]:
@@ -97,7 +107,12 @@ def _sse(event_type: str, payload: dict[str, Any]) -> str:
 # ─── SSE Stream Generator ─────────────────────────────────────────────────────
 
 
-_FUNDAMENTAL_DB_PATH = "/mnt/c/Users/johnn/GITHUB_REPO/FinancialReports/data/financial.db"
+_FUNDAMENTAL_DB_PATH = os.environ.get(
+    "FINANCIAL_DB_PATH",
+    r"C:\Users\johnn\GITHUB_REPO\FinancialReports\data\financial.db"
+    if platform.system() == "Windows"
+    else "/mnt/c/Users/johnn/GITHUB_REPO/FinancialReports/data/financial.db",
+)
 
 
 def _current_year_quarter() -> tuple[int, str]:
@@ -310,6 +325,32 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                 yield _sse("agent_error", {"agent": "fundamental", "error": "DB not found"})
         except Exception as exc:  # noqa: BLE001
             yield _sse("agent_error", {"agent": "fundamental", "error": str(exc)[:120]})
+
+        # Risk (portfolio Greeks — uses default positions.yaml + spot_map)
+        yield _sse("agent_start", {"agent": "risk"})
+        try:
+            from agents.risk_agent import run_risk_agent  # noqa: PLC0415
+            from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
+            from schemas.domain_report import DomainReport  # noqa: PLC0415
+
+            risk_signal = await asyncio.to_thread(run_risk_agent, asof=asof)
+            risk_report = DomainReport(
+                agent=AgentType.RISK,
+                symbol=symbol,
+                market=market,
+                asof=asof,
+                signal=risk_signal.signal,
+                confidence=risk_signal.confidence,
+                time_horizon=TimeHorizon.SHORT,
+                key_findings={k: _safe_val(v) for k, v in risk_signal.metrics.items()},
+                hard_constraints=risk_signal.hard_constraints,
+                narrative_summary=risk_signal.narrative,
+                data_completeness=risk_signal.data_quality.completeness,
+            )
+            reports.append(risk_report)
+            yield _sse("agent_done", _serialize_agent(risk_report))
+        except Exception as exc:  # noqa: BLE001
+            yield _sse("agent_error", {"agent": "risk", "error": str(exc)[:120]})
 
         if not reports:
             yield _sse("error", {"message": "所有 domain agents 均失敗，無法進行仲裁。"})

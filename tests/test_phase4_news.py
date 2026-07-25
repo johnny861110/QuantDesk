@@ -843,8 +843,9 @@ def test_llm_failure_data_quality_completeness_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    When LLM fails, no article was actually analysed.
-    data_quality.completeness must be 0.0 (not the raw article count ratio).
+    When LLM fails, sentiment analysis is incomplete so completeness is halved.
+    Articles were fetched (MOPS 1 + RSS 1 after dedup = 2 unique),
+    so base = max(0.1, 2/5) = 0.4, then * 0.5 = 0.2.
     """
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
@@ -856,7 +857,7 @@ def test_llm_failure_data_quality_completeness_zero(
         openai_client=None,
         asof=NOW,
     )
-    assert sig.data_quality.completeness == pytest.approx(0.0)
+    assert sig.data_quality.completeness == pytest.approx(0.2)
 
 
 def test_llm_failure_degradation_marker_in_errors(
