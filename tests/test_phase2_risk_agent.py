@@ -33,10 +33,11 @@ from agents.risk.aggregation import (
     ConsolidatedTWD,
     IndexPointRecord,
 )
-from agents.risk.position_loader import Position
+from agents.risk.position_loader import Position, load_portfolio
 from agents.risk.pricing_router import GreeksResult
 from agents.risk.scenario import ScenarioResult, ScenarioRow
 from agents.risk_agent import (
+    _node_fetch_iv,
     build_risk_signal,
     run_risk_agent,
 )
@@ -1023,3 +1024,178 @@ class TestIVMissingConfidenceMonotonicity:
                 f"missing_fraction={frac}: expected conf={expected}, "
                 f"got {actual:.6f} (n={n_opt}, priced={n_pr})"
             )
+
+
+# ─── Phase 12: Real IV Wiring Tests ─────────────────────────────────────────
+
+
+class TestRealIVWiring:
+    """Tests for FinMind IV integration into risk agent pipeline."""
+
+    def test_iv_source_summary_all_real(
+        self,
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """When iv_sources marks all as finmind, metrics['iv_source'] reflects it."""
+        from agents.risk.pricing_router import GreeksResult
+
+        positions = [
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=-1, currency="TWD", multiplier=50.0,
+                strike=22500.0, expiry="2026-09-16",
+                option_type="call", style="european",
+            )
+            for _ in range(3)
+        ]
+        mock_gr = GreeksResult(
+            price=100.0, delta=-0.30, gamma=0.0001,
+            vega=2.0, theta=-4.0, rho=-0.01,
+            model="black_scholes", iv=0.25,
+        )
+        greeks_map = {i: mock_gr for i in range(3)}
+        iv_sources = {i: "finmind_backed_out" for i in range(3)}
+
+        signal = build_risk_signal(
+            positions=positions,
+            greeks_map=greeks_map,
+            iv_sources=iv_sources,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        assert "finmind_backed_out: 3/3" in signal.metrics["iv_source"]
+
+    def test_iv_source_summary_mixed(
+        self,
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """Mixed IV sources: summary shows both finmind and placeholder counts."""
+        from agents.risk.pricing_router import GreeksResult
+
+        positions = [
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=-1, currency="TWD", multiplier=50.0,
+                strike=22500.0, expiry="2026-09-16",
+                option_type="call", style="european",
+            )
+            for _ in range(3)
+        ]
+        mock_gr = GreeksResult(
+            price=100.0, delta=-0.30, gamma=0.0001,
+            vega=2.0, theta=-4.0, rho=-0.01,
+            model="black_scholes", iv=0.20,
+        )
+        greeks_map = {i: mock_gr for i in range(3)}
+        iv_sources = {
+            0: "finmind_backed_out",
+            1: "placeholder_0.20",
+            2: "finmind_backed_out",
+        }
+
+        signal = build_risk_signal(
+            positions=positions,
+            greeks_map=greeks_map,
+            iv_sources=iv_sources,
+            agg_result=mock_agg_ok,
+            scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV,
+            asof=MOCK_ASOF,
+        )
+        assert "finmind: 2/3" in signal.metrics["iv_source"]
+        assert "placeholder: 1/3" in signal.metrics["iv_source"]
+
+    def test_confidence_penalty_only_for_placeholder(
+        self,
+        mock_agg_ok: AggregationResult,
+        mock_scenario: ScenarioResult,
+    ) -> None:
+        """Options with real IV should NOT be penalized; only placeholder gets penalty."""
+        from agents.risk.pricing_router import GreeksResult
+
+        positions = [
+            Position(
+                symbol="TXO", instrument_type="option",
+                quantity=-1, currency="TWD", multiplier=50.0,
+                strike=22500.0, expiry="2026-09-16",
+                option_type="call", style="european",
+            )
+            for _ in range(3)
+        ]
+        mock_gr = GreeksResult(
+            price=100.0, delta=-0.30, gamma=0.0001,
+            vega=2.0, theta=-4.0, rho=-0.01,
+            model="black_scholes", iv=0.25,
+        )
+        greeks_map = {i: mock_gr for i in range(3)}
+
+        # All real IV → no penalty
+        iv_all_real = {i: "finmind_backed_out" for i in range(3)}
+        sig_real = build_risk_signal(
+            positions=positions, greeks_map=greeks_map, iv_sources=iv_all_real,
+            agg_result=mock_agg_ok, scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
+        )
+
+        # 1/3 real, 2/3 placeholder → penalty for 2/3
+        iv_mixed = {0: "finmind_backed_out", 1: "placeholder_0.20", 2: "placeholder_0.20"}
+        sig_mixed = build_risk_signal(
+            positions=positions, greeks_map=greeks_map, iv_sources=iv_mixed,
+            agg_result=mock_agg_ok, scenario_result=mock_scenario,
+            portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
+        )
+
+        assert sig_real.confidence == pytest.approx(1.0, abs=1e-9)
+        # missing_fraction = 2/3 → penalty = 0.30 × 2/3 = 0.20
+        assert sig_mixed.confidence == pytest.approx(0.80, abs=1e-9)
+
+    def test_node_fetch_iv_graceful_degradation(self) -> None:
+        """_node_fetch_iv should degrade gracefully when FinMind fails."""
+        state: Any = {
+            "portfolio_cfg": load_portfolio(),
+            "spot_map": {"TXO": 22000.0, "2330.TW": 850.0, "AAPL": 195.0, "TXFF": 22000.0},
+            "asof": MOCK_ASOF,
+            "pipeline_errors": [],
+            "iv_map": {},
+            "iv_sources": {},
+        }
+        # Monkeypatch to simulate failure
+        import unittest.mock
+
+        with unittest.mock.patch(
+            "agents.risk_agent.FinMindOptionsAdapter.fetch",
+            side_effect=ConnectionError("network error"),
+        ):
+            result = _node_fetch_iv(state)
+
+        assert result["iv_map"] == {}
+        assert any("FinMind IV fetch failed" in e for e in result["pipeline_errors"])
+
+    def test_node_fetch_iv_skips_non_txo(self) -> None:
+        """_node_fetch_iv should skip when no TXO positions exist."""
+        from agents.risk.position_loader import PortfolioConfig
+
+        # Portfolio with only stock positions (no TXO)
+        positions = [
+            Position(
+                symbol="2330.TW", instrument_type="stock",
+                quantity=1000, currency="TWD", multiplier=1.0,
+            ),
+        ]
+        cfg = PortfolioConfig(positions=positions, portfolio_nav=5_000_000.0)
+
+        state: Any = {
+            "portfolio_cfg": cfg,
+            "spot_map": {"2330.TW": 850.0},
+            "asof": MOCK_ASOF,
+            "pipeline_errors": [],
+            "iv_map": {},
+            "iv_sources": {},
+        }
+        result = _node_fetch_iv(state)
+        assert result["iv_map"] == {}
+        assert result["pipeline_errors"] == []  # no errors

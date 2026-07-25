@@ -248,6 +248,11 @@ PP_THRESHOLD_CATEGORIES: frozenset[str] = frozenset({
     "Core PCE Price Index",
     "Inflation Rate",
     "Core Inflation Rate",
+    # Phase 12: GDP and Unemployment also suffer low-base distortion.
+    # GDP Growth Rate in Taiwan often 1-2%, Unemployment Rate ~3.5%.
+    "GDP Growth Rate",
+    "GDP",
+    "Unemployment Rate",
 })
 
 # Absolute pp thresholds for PP_THRESHOLD_CATEGORIES.
