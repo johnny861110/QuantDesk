@@ -172,29 +172,151 @@ def _expected_latest_quarter() -> tuple[int, str]:
         return y - 1, "Q4"
 
 
-async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C901, PLR0912, PLR0915
+async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:
+    """SSE generator — runs Router LLM then delegates to _stream_analysis_with_router."""
+    try:
+        from router.intent_router import route, _QUERY_TYPE_AGENTS  # noqa: PLC0415
+        from schemas.domain_report import RouterOutput  # noqa: PLC0415
+        router_out = await asyncio.wait_for(
+            asyncio.to_thread(route, query), timeout=30.0
+        )
+        yield _sse("router", {
+            "scenario": router_out.scenario,
+            "targets": router_out.targets,
+            "market": router_out.market,
+            "depth": router_out.depth,
+            "query_type": getattr(router_out, "query_type", "stock_analysis"),
+            "agents": getattr(router_out, "agents", []),
+            "method": "llm",
+        })
+    except Exception as exc:  # noqa: BLE001
+        from router.intent_router import _QUERY_TYPE_AGENTS  # noqa: PLC0415
+        from schemas.domain_report import RouterOutput  # noqa: PLC0415
+        yield _sse("router", {
+            "scenario": "single_stock", "targets": ["2330"],
+            "market": "TW", "depth": "standard",
+            "query_type": "stock_analysis",
+            "agents": _QUERY_TYPE_AGENTS["stock_analysis"],
+            "method": "fallback", "error": str(exc)[:80],
+        })
+        router_out = RouterOutput(
+            scenario="single_stock", targets=["2330"], market="TW",
+            query_type="stock_analysis",
+            agents=_QUERY_TYPE_AGENTS["stock_analysis"],
+            run_supervisor=False, run_debate=False,
+        )
+
+    async for event in _stream_analysis_with_router(router_out):
+        yield event
+
+
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    finmind_token = os.environ.get("FINMIND_TOKEN") or os.environ.get("FINMIND_KEY") or ""
+    openai_key = os.environ.get("OPENAI_API_KEY") or ""
+
+    # Quick FinMind token validation (non-blocking HEAD request)
+    finmind_status = "unset"
+    if finmind_token:
+        try:
+            import httpx  # noqa: PLC0415
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    "https://api.finmindtrade.com/api/v4/user_info",
+                    headers={"Authorization": f"Bearer {finmind_token}"},
+                )
+            finmind_status = "valid" if resp.status_code == 200 else "invalid"
+        except Exception:  # noqa: BLE001
+            finmind_status = "set_but_unreachable"
+
+    return {
+        "status": "ok",
+        "finmind": finmind_status,
+        "openai": "set" if openai_key else "unset",
+    }
+
+
+def _sse_response(generator: AsyncGenerator[str, None]) -> StreamingResponse:
+    """Wrap an async SSE generator in a StreamingResponse with correct headers."""
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.get("/api/analyze/stream")
+async def analyze_stream(query: str) -> StreamingResponse:
+    """SSE endpoint — 接收自然語言查詢，Router 自動決定 query_type 與 agent 組合。"""
+    return _sse_response(_stream_analysis(query))
+
+
+# ─── 快捷查詢類型 Endpoints ────────────────────────────────────────────────────
+
+
+async def _stream_preset(
+    query_type: str,
+    symbol: str,
+    market: str = "TW",
+) -> AsyncGenerator[str, None]:
     """
-    SSE generator with semaphore, parallel agents, and per-agent timeouts.
-
-    Concurrency design
-    ------------------
-    All domain agents run in parallel via asyncio tasks + queue.  Each agent is
-    wrapped with asyncio.wait_for(_AGENT_TIMEOUT) so a stalled HTTP call (e.g.
-    RSS feed with no timeout) cannot block the entire pipeline.  The queue lets
-    the SSE stream emit agent_done events in completion order, giving the client
-    progressive updates instead of a single batch.
-
-    High-concurrency safety
-    -----------------------
-    _ANALYSIS_SEMAPHORE limits concurrent analyses to 5, preventing thread-pool
-    exhaustion when many users connect simultaneously.
+    直接用 query_type preset 跑分析，略過 Router LLM。
+    適合前端已知查詢類型時使用（快速、省 LLM token）。
     """
+    from router.intent_router import _QUERY_TYPE_AGENTS  # noqa: PLC0415
+    from schemas.domain_report import RouterOutput  # noqa: PLC0415
 
-    # ── Queue-based parallel agent runner ─────────────────────────────────────
-    # Each agent task puts ("start"|"done"|"error", agent_name, data) into the
-    # queue.  The main loop drains the queue and yields SSE events progressively.
+    agents = _QUERY_TYPE_AGENTS.get(query_type, _QUERY_TYPE_AGENTS["stock_analysis"])
+    fake_router = RouterOutput(
+        scenario="single_stock",
+        targets=[symbol],
+        market=market,
+        depth="standard",
+        original_query=f"{symbol} {query_type}",
+        query_type=query_type,  # type: ignore[arg-type]
+        agents=agents,
+        run_supervisor=query_type == "investment_strategy",
+        run_debate=query_type == "investment_strategy",
+    )
 
-    _AgentQueueItem = tuple[str, str, Any]  # (kind, agent_name, data)
+    # Emit synthetic router event so frontend knows what was routed
+    yield _sse("router", {
+        "scenario": fake_router.scenario,
+        "targets": fake_router.targets,
+        "market": fake_router.market,
+        "depth": fake_router.depth,
+        "query_type": fake_router.query_type,
+        "agents": fake_router.agents,
+        "method": "preset",
+    })
+
+    # Reuse _stream_analysis but inject the preset router output.
+    # We do this by building a minimal query string that the router would
+    # interpret correctly — but since we already have router_out we patch it
+    # via a thin wrapper.
+    async for event in _stream_analysis_with_router(fake_router):
+        yield event
+
+
+async def _stream_analysis_with_router(
+    router_out: Any,
+) -> AsyncGenerator[str, None]:
+    """
+    Internal: run the agent pipeline with a pre-built RouterOutput.
+    Skips the Router LLM step; everything else is identical to _stream_analysis.
+    """
+    from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
+    from schemas.domain_report import DomainReport  # noqa: PLC0415
+    from router.intent_router import _QUERY_TYPE_AGENTS  # noqa: PLC0415
+
+    _AgentQueueItem = tuple[str, str, Any]
 
     async def _run_agent(
         name: str,
@@ -213,47 +335,16 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
     async with _ANALYSIS_SEMAPHORE:
         try:
             asof = datetime.now(tz=UTC)
-
-            # ── Step 1: Router ────────────────────────────────────────────────
-            try:
-                from router.intent_router import route  # noqa: PLC0415
-                router_out = await asyncio.wait_for(
-                    asyncio.to_thread(route, query), timeout=30.0
-                )
-                yield _sse("router", {
-                    "scenario": router_out.scenario,
-                    "targets": router_out.targets,
-                    "market": router_out.market,
-                    "depth": router_out.depth,
-                    "query_type": getattr(router_out, "query_type", "stock_analysis"),
-                    "agents": getattr(router_out, "agents", []),
-                    "method": "llm",
-                })
-            except Exception as exc:  # noqa: BLE001
-                yield _sse("router", {
-                    "scenario": "single_stock",
-                    "targets": ["2330"],
-                    "market": "TW",
-                    "depth": "standard",
-                    "method": "fallback",
-                    "error": str(exc)[:80],
-                })
-                router_out = type("R", (), {  # type: ignore[assignment]
-                    "scenario": "single_stock",
-                    "targets": ["2330"],
-                    "market": "TW",
-                    "depth": "standard",
-                })()
-
             symbol: str = router_out.targets[0] if router_out.targets else "2330"
             market: str = getattr(router_out, "market", "TW")
+            active_agents: list[str] = (
+                getattr(router_out, "agents", None)
+                or _QUERY_TYPE_AGENTS["stock_analysis"]
+            )
+            run_supervisor: bool = getattr(router_out, "run_supervisor", False)
+            run_debate: bool = getattr(router_out, "run_debate", False)
 
-            # ── Step 2: Build agent coroutines ────────────────────────────────
-            # Lazy imports inside coroutines keep module load fast.
-
-            from schemas.agent_signal import AgentType, TimeHorizon  # noqa: PLC0415
-            from schemas.domain_report import DomainReport  # noqa: PLC0415
-
+            # Reuse the same coroutine builders from _stream_analysis
             async def _technical() -> Any:
                 from agents.technical_agent import run_technical_agent  # noqa: PLC0415
                 sig = await asyncio.to_thread(
@@ -312,33 +403,34 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                     data_completeness=sig.data_quality.completeness,
                 )
 
+            # Shared queue for fundamental crawl progress events.
+            # The main drain loop below picks these up and emits SSE events.
+            _crawl_progress: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+
             async def _fundamental() -> Any:
-                from adapters.fundamental_adapter import FundamentalAdapter as _FundamentalAdapter  # noqa: PLC0415
+                from adapters.fundamental_adapter import FundamentalAdapter as _FA  # noqa: PLC0415
                 from agents.fundamental_agent import FundamentalAgent  # noqa: PLC0415
                 if not os.path.exists(_FUNDAMENTAL_DB_PATH):
                     raise FileNotFoundError("DB not found")
-
-                adapter = _FundamentalAdapter(_FUNDAMENTAL_DB_PATH)
+                adapter = _FA(_FUNDAMENTAL_DB_PATH)
                 filing = adapter.get_latest_filing(symbol)
-
                 if filing is None:
-                    # No data at all — trigger crawl for expected latest quarter
                     exp_year, exp_quarter = _expected_latest_quarter()
                     crawl_ok = await asyncio.wait_for(
-                        adapter.crawl_if_missing(symbol, exp_year, exp_quarter),
-                        timeout=300.0,  # pipeline can take up to 5 min
+                        adapter.crawl_if_missing(
+                            symbol, exp_year, exp_quarter,
+                            progress_queue=_crawl_progress,
+                        ),
+                        timeout=300.0,
                     )
                     if not crawl_ok:
-                        raise ValueError(f"爬取 {symbol} {exp_year}{exp_quarter} 失敗，無財報資料")
+                        raise ValueError(f"爬取 {symbol} 失敗，無財報資料")
                     filing = adapter.get_latest_filing(symbol)
-
                 if filing is None:
                     raise ValueError(f"No financial data found for {symbol}")
-
                 year, quarter = filing
                 sig = await asyncio.to_thread(
-                    FundamentalAgent(_FUNDAMENTAL_DB_PATH).run,
-                    symbol, year, quarter,
+                    FundamentalAgent(_FUNDAMENTAL_DB_PATH).run, symbol, year, quarter,
                 )
                 return DomainReport(
                     agent=AgentType.FUNDAMENTAL, symbol=symbol, market=market, asof=asof,
@@ -362,31 +454,16 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                     data_completeness=sig.data_quality.completeness,
                 )
 
-            # ── Step 3: Launch selected agents in parallel ────────────────────
-            # Router specifies which agents to run via router_out.agents.
-            # Fallback to stock_analysis preset if Router didn't set agents.
-            from router.intent_router import _QUERY_TYPE_AGENTS  # noqa: PLC0415
-            active_agents: list[str] = (
-                getattr(router_out, "agents", None)
-                or _QUERY_TYPE_AGENTS["stock_analysis"]
-            )
-            run_supervisor: bool = getattr(router_out, "run_supervisor", True)
-            run_debate: bool = getattr(router_out, "run_debate", False)
-
-            _ALL_AGENT_BUILDERS: dict[str, Any] = {
-                "technical":    _technical,
-                "chip":         _chip,
-                "macro":        _macro,
-                "news":         _news,
-                "cross_market": _cross_market,
-                "fundamental":  _fundamental,
-                "risk":         _risk,
+            _ALL_BUILDERS: dict[str, Any] = {
+                "technical": _technical, "chip": _chip, "macro": _macro,
+                "news": _news, "cross_market": _cross_market,
+                "fundamental": _fundamental, "risk": _risk,
             }
 
             queue: asyncio.Queue[_AgentQueueItem] = asyncio.Queue()
             agent_defs = [
                 (name, builder())
-                for name, builder in _ALL_AGENT_BUILDERS.items()
+                for name, builder in _ALL_BUILDERS.items()
                 if name in active_agents
             ]
             n_agents = len(agent_defs)
@@ -395,10 +472,14 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                 for name, coro in agent_defs
             ]
 
-            # Drain the queue as agents complete; emit SSE events progressively.
             reports: list[Any] = []
             n_done = 0
             while n_done < n_agents:
+                # Drain crawl progress events (non-blocking) before waiting for agents
+                while not _crawl_progress.empty():
+                    prog = _crawl_progress.get_nowait()
+                    yield _sse("fundamental_crawl", prog)
+
                 kind, name, data = await queue.get()
                 if kind == "start":
                     yield _sse("agent_start", {"agent": name})
@@ -406,61 +487,34 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                     n_done += 1
                     reports.append(data)
                     yield _sse("agent_done", _serialize_agent(data))
-                else:  # "error"
+                else:
                     n_done += 1
                     yield _sse("agent_error", {"agent": name, "error": data})
 
-            # Ensure all tasks are properly awaited (they should be done by now).
             await asyncio.gather(*tasks, return_exceptions=True)
 
-            if not reports:
-                yield _sse("error", {"message": "所有 domain agents 均失敗，無法進行仲裁。"})
-                yield _sse("done", {})
-                return
-
-            # ── Step 4: Supervisor / Debate（依 Router 指示決定是否執行）────────
-            if not run_supervisor:
-                # stock_analysis / macro_outlook / fundamental_review 等不需要仲裁
+            if not reports or not run_supervisor:
                 yield _sse("done", {})
                 return
 
             yield _sse("debate_start", {})
             try:
                 from supervisor.graph import Supervisor  # noqa: PLC0415
-
                 if run_debate:
                     sup_out, debate_out = await Supervisor().aggregate_debate(
-                        domain_reports=reports,
-                        symbol=symbol,
+                        domain_reports=reports, symbol=symbol,
                         scenario=getattr(router_out, "scenario", "single_stock"),
                     )
-                    yield _sse("debate_bull", {
-                        "thesis": debate_out.bull.thesis,
-                        "key_points": debate_out.bull.key_points,
-                        "confidence": debate_out.bull.confidence,
-                    })
-                    yield _sse("debate_bear", {
-                        "thesis": debate_out.bear.thesis,
-                        "key_points": debate_out.bear.key_points,
-                        "confidence": debate_out.bear.confidence,
-                    })
-                    yield _sse("debate_pm", {
-                        "thesis": debate_out.pm_verdict.thesis,
-                        "key_points": debate_out.pm_verdict.key_points,
-                        "confidence": debate_out.pm_verdict.confidence,
-                        "signal": debate_out.final_signal.value,
-                    })
+                    yield _sse("debate_bull", {"thesis": debate_out.bull.thesis, "key_points": debate_out.bull.key_points, "confidence": debate_out.bull.confidence})
+                    yield _sse("debate_bear", {"thesis": debate_out.bear.thesis, "key_points": debate_out.bear.key_points, "confidence": debate_out.bear.confidence})
+                    yield _sse("debate_pm", {"thesis": debate_out.pm_verdict.thesis, "key_points": debate_out.pm_verdict.key_points, "confidence": debate_out.pm_verdict.confidence, "signal": debate_out.final_signal.value})
                 else:
-                    # Supervisor only, no debate
                     from schemas.domain_report import domain_report_to_agent_signal  # noqa: PLC0415
                     signals = [domain_report_to_agent_signal(r) for r in reports]
-                    sup_out = await asyncio.to_thread(
-                        Supervisor().aggregate, signals
-                    )
+                    sup_out = await asyncio.to_thread(Supervisor().aggregate, signals)
                 yield _sse("supervisor", _serialize_supervisor(sup_out))
-
             except Exception as exc:  # noqa: BLE001
-                yield _sse("error", {"message": f"Debate/Supervisor 失敗: {str(exc)[:120]}"})
+                yield _sse("error", {"message": f"Supervisor 失敗: {str(exc)[:120]}"})
 
             yield _sse("done", {})
 
@@ -469,27 +523,33 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
             yield _sse("done", {})
 
 
-# ─── Routes ───────────────────────────────────────────────────────────────────
+# ─── 快捷查詢 Endpoints ────────────────────────────────────────────────────────
+
+@app.get("/api/analyze/stock")
+async def analyze_stock(symbol: str, market: str = "TW") -> StreamingResponse:
+    """個股技術/籌碼/新聞分析（technical + chip + news）。不含 Supervisor。"""
+    return _sse_response(_stream_preset("stock_analysis", symbol, market))
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "finmind": "set" if os.environ.get("FINMIND_TOKEN") or os.environ.get("FINMIND_KEY") else "unset",
-        "openai": "set" if os.environ.get("OPENAI_API_KEY") else "unset",
-    }
+@app.get("/api/analyze/strategy")
+async def analyze_strategy(query: str) -> StreamingResponse:
+    """投資策略（全 agent + Debate + Supervisor）。等同完整分析。"""
+    return _sse_response(_stream_analysis(query))
 
 
-@app.get("/api/analyze/stream")
-async def analyze_stream(query: str) -> StreamingResponse:
-    """SSE endpoint — 接收自然語言查詢，串流回傳分析事件。"""
-    return StreamingResponse(
-        _stream_analysis(query),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+@app.get("/api/analyze/fundamental")
+async def analyze_fundamental(symbol: str, market: str = "TW") -> StreamingResponse:
+    """財報/基本面分析（fundamental + chip）。"""
+    return _sse_response(_stream_preset("fundamental_review", symbol, market))
+
+
+@app.get("/api/analyze/macro")
+async def analyze_macro(market: str = "TW") -> StreamingResponse:
+    """總經快照（macro + cross_market）。"""
+    return _sse_response(_stream_preset("macro_outlook", "MARKET", market))
+
+
+@app.get("/api/analyze/risk")
+async def analyze_risk() -> StreamingResponse:
+    """組合風控快照（risk only，讀 positions.yaml）。"""
+    return _sse_response(_stream_preset("portfolio_risk", "PORTFOLIO"))

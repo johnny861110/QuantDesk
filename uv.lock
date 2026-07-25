@@ -2439,6 +2439,7 @@ name = "quantdesk"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cachetools" },
     { name = "fastapi" },
     { name = "feedparser" },
     { name = "financial-agent" },
@@ -2474,6 +2475,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cachetools", specifier = ">=7.1.4" },
     { name = "fastapi", specifier = ">=0.139.2" },
     { name = "feedparser", specifier = ">=6.0.12" },
     { name = "financial-agent", editable = "../Financial_Agent" },

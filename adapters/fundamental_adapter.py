@@ -19,6 +19,7 @@ Phase 1c will wire Financial_Agent's analysis services
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -367,6 +368,7 @@ class FundamentalAdapter(_BaseFundamentalAdapter):
         year: int,
         quarter: str,
         output_dir: str | Path | None = None,
+        progress_queue: asyncio.Queue[dict[str, str]] | None = None,
     ) -> bool:
         """
         If filing_key does not exist or is not insight_ready, run the full
@@ -374,13 +376,16 @@ class FundamentalAdapter(_BaseFundamentalAdapter):
 
         Returns True if data is now available, False if pipeline failed.
 
-        output_dir: where downloaded PDFs/XBRL are saved.
-                    Defaults to <db_dir>/downloads/.
+        output_dir      : where downloaded PDFs/XBRL are saved.
+                          Defaults to <db_dir>/downloads/.
+        progress_queue  : optional asyncio.Queue for stage progress events.
+                          Each event is a dict {"stage": str, "status": str}.
+                          Caller can forward these to SSE stream.
         """
         from pathlib import Path as _Path  # noqa: PLC0415
 
         from src.domain.identity import FilingIdentity  # type: ignore[import]  # noqa: PLC0415
-        from src.pipeline.run import run_pipeline_async  # type: ignore[import]  # noqa: PLC0415
+        from src.pipeline.run import STAGES, run_pipeline_async  # type: ignore[import]  # noqa: PLC0415
 
         if output_dir is None:
             output_dir = self._db_path.parent / "downloads"
@@ -390,17 +395,30 @@ class FundamentalAdapter(_BaseFundamentalAdapter):
         # Check if already available
         existing = self.get_latest_filing(stock_code)
         if existing and existing == (year, quarter):
+            if progress_queue is not None:
+                await progress_queue.put({"stage": "all", "status": "already_ready"})
             return True  # already insight_ready
 
-        result = await run_pipeline_async(
-            identity,
-            self._store,
-            _Path(output_dir),
-        )
+        # Run each stage individually so we can emit progress events
+        all_ok = True
+        for stage in STAGES:
+            if progress_queue is not None:
+                await progress_queue.put({"stage": stage, "status": "running"})
+            result = await run_pipeline_async(
+                identity,
+                self._store,
+                _Path(output_dir),
+                stages=[stage],
+            )
+            stage_result = result.get(stage, {})
+            stage_status = stage_result.get("status", "failed")
+            if progress_queue is not None:
+                await progress_queue.put({"stage": stage, "status": stage_status})
+            if stage_status == "failed":
+                all_ok = False
+                break
 
-        # Pipeline succeeded if all stages reached insight_ready
-        insights_result = result.get("insights", {})
-        return insights_result.get("status") not in (None, "failed")
+        return all_ok
 
     def _get_company_name(self, stock_code: str) -> str:
         with self._store.conn() as c:

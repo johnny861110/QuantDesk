@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 
 from adapters.base import PriceAdapter, SourcedData
+from adapters.cache import ttl_cached
 
 # ─── FinMind constants (shared with options_adapter) ─────────────────────────
 
@@ -82,6 +83,7 @@ class YFinancePriceAdapter(PriceAdapter):
     def source_name(self) -> str:  # type: ignore[override]
         return "yfinance_price"
 
+    @ttl_cached(ttl=300)  # 5-minute cache — yfinance data doesn't change intraday
     def fetch(  # type: ignore[override]
         self,
         symbol: str,

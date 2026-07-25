@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 
 from adapters.base import CrossMarketAdapter, SourcedData
+from adapters.cache import ttl_cached
 
 # ─── Default symbol set ───────────────────────────────────────────────────────
 
@@ -114,6 +115,7 @@ class YFinanceCrossMarketAdapter(CrossMarketAdapter):
     def source_name(self) -> str:
         return "yfinance_cross_market"
 
+    @ttl_cached(ttl=300)  # 5-minute cache — cross-market data changes slowly
     def fetch(  # type: ignore[override]
         self,
         symbols: dict[str, str] | None = None,

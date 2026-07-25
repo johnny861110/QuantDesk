@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from adapters.base import FXAdapter, SourcedData
+from adapters.cache import ttl_cached
 
 # Yahoo Finance appends this suffix to currency pair tickers
 _YF_FX_SUFFIX: str = "=X"
@@ -57,6 +58,7 @@ class YFinanceFXAdapter(FXAdapter):
     def source_name(self) -> str:
         return "yfinance_fx"
 
+    @ttl_cached(ttl=300)  # 5-minute cache — FX rate intraday change is negligible
     def fetch(self, pair: str = "USDTWD", **kwargs: Any) -> SourcedData:
         """
         Fetch the most recent daily close for *pair*.
