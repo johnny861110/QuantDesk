@@ -106,6 +106,12 @@ function handleEvent(
         currentEvent: `Supervisor 仲裁完成: ${payload.signal?.toUpperCase()} (${(payload.confidence * 100).toFixed(0)}%)`,
       }
 
+    case 'fundamental_crawl':
+      return {
+        ...state,
+        currentEvent: `財報爬取中：${payload.stage ?? ''} (${payload.status ?? ''})`,
+      }
+
     case 'done':
       return { ...state, status: 'done', currentEvent: '分析完成 ✓', elapsedMs: Date.now() - startedAt }
 

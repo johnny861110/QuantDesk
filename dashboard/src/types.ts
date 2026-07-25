@@ -7,6 +7,8 @@ export interface RouterPayload {
   market: string
   depth: string
   method: string
+  query_type?: string   // e.g. "stock_analysis" | "investment_strategy" | ...
+  agents?: string[]     // which agents will run, e.g. ["technical","chip","news"]
   error?: string
 }
 

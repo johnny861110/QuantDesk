@@ -37,7 +37,9 @@ export default function App() {
   // Record completed analysis in history
   const prevStatusRef = useRef(state.status)
   if (prevStatusRef.current === 'streaming' && state.status === 'done') {
-    const sig = state.supervisor?.signal as Signal | undefined
+    // For queries without Supervisor, fall back to the first non-neutral agent signal
+    const sig: Signal | undefined = state.supervisor?.signal
+      ?? (Object.values(state.agents).find(a => !a.loading && !a.failed && a.signal !== 'neutral')?.signal as Signal | undefined)
     addQuery(query, sig)
   }
   prevStatusRef.current = state.status
@@ -256,7 +258,7 @@ export default function App() {
         )}
 
         {/* ── Supervisor Final Verdict ──────────────────── */}
-        {state.supervisor && (
+        {state.supervisor ? (
           <div>
             <div className="mb-3 flex items-center gap-2">
               <div className="h-px flex-1 bg-gray-800" />
@@ -266,6 +268,11 @@ export default function App() {
               <div className="h-px flex-1 bg-gray-800" />
             </div>
             <SupervisorCard data={state.supervisor} />
+          </div>
+        ) : state.status === 'done' && Object.keys(state.agents).length > 0 && (
+          <div className="rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-3 text-center text-xs text-gray-600">
+            本次為 <span className="text-gray-400 font-medium">{state.router?.query_type ?? '個股分析'}</span> 模式，各 Agent 結果獨立輸出，不進行 Supervisor 仲裁整合。
+            若需完整投資建議請詢問「{state.router?.targets?.[0] ?? ''} 值得買嗎」等策略性問題。
           </div>
         )}
 

@@ -6,8 +6,8 @@ interface Stage {
   icon: string
 }
 
-// Domain agent stages (row 1)
-const AGENT_STAGES: Stage[] = [
+// All possible domain agent stages (used as lookup)
+const ALL_AGENT_STAGES: Stage[] = [
   { id: 'router',      label: 'Router', icon: '🔀' },
   { id: 'technical',   label: '技術',   icon: '📉' },
   { id: 'chip',        label: '籌碼',   icon: '🏦' },
@@ -17,6 +17,7 @@ const AGENT_STAGES: Stage[] = [
   { id: 'fundamental', label: '基本面', icon: '📋' },
   { id: 'risk',        label: '風控',   icon: '🛡️' },
 ]
+const AGENT_STAGE_MAP = Object.fromEntries(ALL_AGENT_STAGES.map(s => [s.id, s]))
 
 // Synthesis stages (row 2)
 const SYNTH_STAGES: Stage[] = [
@@ -110,13 +111,27 @@ interface Props {
 export function PipelineProgress({ state }: Props) {
   if (state.status === 'idle') return null
 
+  // Build dynamic agent stage list from router.agents (if available),
+  // otherwise fall back to all agents that have appeared in state.agents.
+  const routerAgents = state.router?.agents
+  const activeAgentIds: string[] = routerAgents && routerAgents.length > 0
+    ? ['router', ...routerAgents]
+    : ['router', ...Object.keys(state.agents)]
+  const agentStages: Stage[] = activeAgentIds
+    .map(id => AGENT_STAGE_MAP[id])
+    .filter(Boolean)
+
+  // Only show 仲裁 row if supervisor or debate is relevant
+  const showSynth = state.debate.started || state.supervisor !== null
+    || (state.router?.agents?.includes('risk') ?? true)  // investment_strategy always has synth
+
   return (
     <div className="animate-fade-in rounded-xl border border-gray-800 bg-gray-900/60 px-4 py-3 space-y-2">
-      {/* Row 1: Router + Domain Agents */}
+      {/* Row 1: Router + Active Domain Agents */}
       <div className="flex items-center">
-        {AGENT_STAGES.map((stage, i) => {
+        {agentStages.map((stage, i) => {
           const status = getStageStatus(stage.id, state)
-          const isLast = i === AGENT_STAGES.length - 1
+          const isLast = i === agentStages.length - 1
           return (
             <div key={stage.id} className="flex flex-1 items-center">
               <StageNode stage={stage} status={status} index={i} />
@@ -126,26 +141,30 @@ export function PipelineProgress({ state }: Props) {
         })}
       </div>
 
-      {/* Divider + Row 2: Debate → Supervisor */}
-      <div className="flex items-center gap-2">
-        <div className="h-px flex-1 bg-gray-800" />
-        <span className="text-[10px] text-gray-700 uppercase tracking-wider">仲裁</span>
-        <div className="h-px flex-1 bg-gray-800" />
-      </div>
-      <div className="flex items-center justify-center gap-4">
-        {SYNTH_STAGES.map((stage, i) => {
-          const status = getStageStatus(stage.id, state)
-          const isLast = i === SYNTH_STAGES.length - 1
-          return (
-            <div key={stage.id} className="flex items-center gap-4">
-              <StageNode stage={stage} status={status} index={i} />
-              {!isLast && (
-                <div className={`h-0.5 w-16 mb-4 transition-all duration-700 ${status === 'done' ? 'bg-green-700' : 'bg-gray-800'}`} />
-              )}
-            </div>
-          )
-        })}
-      </div>
+      {/* Row 2: Debate → Supervisor (only for investment_strategy) */}
+      {showSynth && (
+        <>
+          <div className="flex items-center gap-2">
+            <div className="h-px flex-1 bg-gray-800" />
+            <span className="text-[10px] text-gray-700 uppercase tracking-wider">仲裁</span>
+            <div className="h-px flex-1 bg-gray-800" />
+          </div>
+          <div className="flex items-center justify-center gap-4">
+            {SYNTH_STAGES.map((stage, i) => {
+              const status = getStageStatus(stage.id, state)
+              const isLast = i === SYNTH_STAGES.length - 1
+              return (
+                <div key={stage.id} className="flex items-center gap-4">
+                  <StageNode stage={stage} status={status} index={i} />
+                  {!isLast && (
+                    <div className={`h-0.5 w-16 mb-4 transition-all duration-700 ${status === 'done' ? 'bg-green-700' : 'bg-gray-800'}`} />
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
     </div>
   )
 }
