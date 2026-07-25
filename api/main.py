@@ -403,8 +403,17 @@ async def _stream_analysis_with_router(
 
             async def _news() -> Any:
                 from agents.news_agent import run_news_agent  # noqa: PLC0415
+                from adapters.news_adapter import TavilyNewsAdapter  # noqa: PLC0415
+
+                # Inject TavilyNewsAdapter when TAVILY_API_KEY is set.
+                # Without explicit injection, run_news_agent defaults to None
+                # and skips Tavily entirely.
+                tavily_key = os.environ.get("TAVILY_API_KEY", "")
+                tavily = TavilyNewsAdapter(api_key=tavily_key) if tavily_key else None
+
                 sig = await asyncio.to_thread(
-                    run_news_agent, symbol=symbol, market=market, asof=asof
+                    run_news_agent, symbol=symbol, market=market, asof=asof,
+                    tavily_adapter=tavily,
                 )
                 return DomainReport(
                     agent=AgentType.NEWS, symbol=symbol, market=market, asof=asof,
