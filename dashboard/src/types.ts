@@ -21,6 +21,7 @@ export interface AgentPayload {
   errors: string[]
   loading?: boolean
   failed?: boolean   // true when agent_error received for this agent
+  receivedAt?: number  // timestamp when agent_done was received
 }
 
 export interface DebatePartyPayload {
@@ -39,6 +40,16 @@ export interface HorizonInfo {
   agents: string[]
 }
 
+export interface HardConstraintDetail {
+  agent: string
+  type: string
+  current: number
+  limit: number
+  breached: boolean
+  verifiable: boolean
+  detail: string | null
+}
+
 export interface SupervisorPayload {
   signal: Signal
   confidence: number
@@ -48,6 +59,7 @@ export interface SupervisorPayload {
   mandatory_warnings: string[]
   review_reasons: string[]
   horizon_breakdown: Record<string, HorizonInfo>
+  hard_constraint_details?: HardConstraintDetail[]
 }
 
 export interface DebateState {

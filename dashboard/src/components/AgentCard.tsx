@@ -1,4 +1,7 @@
 import type { AgentPayload, Signal } from '../types'
+import { RiskGreeksChart } from './charts/RiskGreeksChart'
+import { TechnicalRadar } from './charts/TechnicalRadar'
+import { ChipFlowChart } from './charts/ChipFlowChart'
 
 const SIGNAL_STYLE: Record<Signal, { badge: string; bar: string; glow: string; label: string }> = {
   bullish: { badge: 'bg-green-900/60 text-green-400 border-green-700', bar: 'bg-green-500', glow: 'border-green-800',  label: '偏多 ↑' },
@@ -162,6 +165,11 @@ export function AgentCard({ data }: Props) {
         </div>
       </div>
 
+      {/* Agent-specific chart */}
+      {data.agent === 'risk' && <RiskGreeksChart findings={data.key_findings} />}
+      {data.agent === 'technical' && <TechnicalRadar findings={data.key_findings} />}
+      {data.agent === 'chip' && <ChipFlowChart findings={data.key_findings} />}
+
       {/* Key findings */}
       {findings.length > 0 && (
         <div className="mt-3 rounded-lg bg-gray-900/50 p-2.5 space-y-1.5">
@@ -186,9 +194,16 @@ export function AgentCard({ data }: Props) {
 
       {/* Footer */}
       <div className="mt-3 flex items-center justify-between text-xs">
-        <span className="rounded bg-gray-700/60 px-1.5 py-0.5 text-gray-400">
-          {data.time_horizon || 'short'}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="rounded bg-gray-700/60 px-1.5 py-0.5 text-gray-400">
+            {data.time_horizon || 'short'}
+          </span>
+          {data.receivedAt && (
+            <span className="text-gray-600 font-mono text-[10px]">
+              {new Date(data.receivedAt).toLocaleTimeString()}
+            </span>
+          )}
+        </div>
         <span className={`font-medium ${completeness >= 70 ? 'text-green-500' : completeness >= 40 ? 'text-yellow-500' : 'text-red-500'}`}>
           資料完整 {completeness}%
         </span>
