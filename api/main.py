@@ -403,17 +403,32 @@ async def _stream_analysis_with_router(
 
             async def _news() -> Any:
                 from agents.news_agent import run_news_agent  # noqa: PLC0415
-                from adapters.news_adapter import TavilyNewsAdapter  # noqa: PLC0415
+                from adapters.news_adapter import (  # noqa: PLC0415
+                    TavilyNewsAdapter,
+                    _stock_chinese_name,
+                    _strip_tw_suffix,
+                )
 
                 # Inject TavilyNewsAdapter when TAVILY_API_KEY is set.
-                # Without explicit injection, run_news_agent defaults to None
-                # and skips Tavily entirely.
                 tavily_key = os.environ.get("TAVILY_API_KEY", "")
                 tavily = TavilyNewsAdapter(api_key=tavily_key) if tavily_key else None
+
+                # Build rich query_terms so all adapters (RSS + Tavily) search
+                # with meaningful keywords, not just the bare stock code.
+                # e.g. symbol="2330" → terms=["台積電", "2330", "TSMC"]
+                code = _strip_tw_suffix(symbol)
+                name = _stock_chinese_name(symbol)
+                terms: list[str] = [name] if name != code else []
+                terms.append(code)
+                # Add common English aliases for major chips
+                _en_alias = {"2330": "TSMC", "2454": "MediaTek", "2317": "Foxconn"}
+                if code in _en_alias:
+                    terms.append(_en_alias[code])
 
                 sig = await asyncio.to_thread(
                     run_news_agent, symbol=symbol, market=market, asof=asof,
                     tavily_adapter=tavily,
+                    query_terms=terms,
                 )
                 return DomainReport(
                     agent=AgentType.NEWS, symbol=symbol, market=market, asof=asof,
