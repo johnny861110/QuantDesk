@@ -144,19 +144,32 @@ _FUNDAMENTAL_DB_PATH = os.environ.get(
 )
 
 
-def _current_year_quarter() -> tuple[int, str]:
-    """Return the most recently *completed* quarter as (year, 'Q1'|'Q2'|'Q3'|'Q4')."""
+def _expected_latest_quarter() -> tuple[int, str]:
+    """
+    Return the latest quarter whose public filing deadline has passed,
+    based on Taiwan TWSE disclosure rules:
+
+      Q1 (Jan–Mar)  → deadline May 15   → available from May 16
+      Q2 (Apr–Jun)  → deadline Aug 14   → available from Aug 15
+      Q3 (Jul–Sep)  → deadline Nov 14   → available from Nov 15
+      Q4 (Oct–Dec)  → deadline Mar 31+1 → available from Apr 1 next year
+
+    This is the quarter we should try to crawl when data is missing.
+    """
     now = datetime.now(tz=UTC)
-    # Q1 ends Mar, Q2 ends Jun, Q3 ends Sep, Q4 ends Dec
-    # Use the quarter that ended at least one month ago (data lag)
-    month = now.month - 1  # shift back 1 month for data availability
-    if month <= 0:
-        month += 12
-        year = now.year - 1
+    y, m, d = now.year, now.month, now.day
+
+    if (m > 5) or (m == 5 and d >= 16):
+        # Q1 is available
+        if (m > 8) or (m == 8 and d >= 15):
+            # Q2 is available
+            if (m > 11) or (m == 11 and d >= 15):
+                return y, "Q3"  # Q3 available
+            return y, "Q2"
+        return y, "Q1"
     else:
-        year = now.year
-    quarter = f"Q{(month - 1) // 3 + 1}"
-    return year, quarter
+        # Before May 16 — Q4 of previous year is the latest
+        return y - 1, "Q4"
 
 
 async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C901, PLR0912, PLR0915
@@ -302,13 +315,24 @@ async def _stream_analysis(query: str) -> AsyncGenerator[str, None]:  # noqa: C9
                 from agents.fundamental_agent import FundamentalAgent  # noqa: PLC0415
                 if not os.path.exists(_FUNDAMENTAL_DB_PATH):
                     raise FileNotFoundError("DB not found")
-                # Use the latest insight_ready filing in the DB rather than a
-                # calendar-derived quarter — avoids empty results when the current
-                # quarter has not been processed yet.
+
                 adapter = _FundamentalAdapter(_FUNDAMENTAL_DB_PATH)
                 filing = adapter.get_latest_filing(symbol)
+
+                if filing is None:
+                    # No data at all — trigger crawl for expected latest quarter
+                    exp_year, exp_quarter = _expected_latest_quarter()
+                    crawl_ok = await asyncio.wait_for(
+                        adapter.crawl_if_missing(symbol, exp_year, exp_quarter),
+                        timeout=300.0,  # pipeline can take up to 5 min
+                    )
+                    if not crawl_ok:
+                        raise ValueError(f"爬取 {symbol} {exp_year}{exp_quarter} 失敗，無財報資料")
+                    filing = adapter.get_latest_filing(symbol)
+
                 if filing is None:
                     raise ValueError(f"No financial data found for {symbol}")
+
                 year, quarter = filing
                 sig = await asyncio.to_thread(
                     FundamentalAgent(_FUNDAMENTAL_DB_PATH).run,

@@ -361,6 +361,47 @@ class FundamentalAdapter(_BaseFundamentalAdapter):
             return None
         return int(row[0]), str(row[1])
 
+    async def crawl_if_missing(
+        self,
+        stock_code: str,
+        year: int,
+        quarter: str,
+        output_dir: str | Path | None = None,
+    ) -> bool:
+        """
+        If filing_key does not exist or is not insight_ready, run the full
+        FinancialReports pipeline (ingest → extract → validate → insights).
+
+        Returns True if data is now available, False if pipeline failed.
+
+        output_dir: where downloaded PDFs/XBRL are saved.
+                    Defaults to <db_dir>/downloads/.
+        """
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        from src.domain.identity import FilingIdentity  # type: ignore[import]  # noqa: PLC0415
+        from src.pipeline.run import run_pipeline_async  # type: ignore[import]  # noqa: PLC0415
+
+        if output_dir is None:
+            output_dir = self._db_path.parent / "downloads"
+
+        identity = FilingIdentity(stock_code=stock_code, year=year, quarter=quarter)
+
+        # Check if already available
+        existing = self.get_latest_filing(stock_code)
+        if existing and existing == (year, quarter):
+            return True  # already insight_ready
+
+        result = await run_pipeline_async(
+            identity,
+            self._store,
+            _Path(output_dir),
+        )
+
+        # Pipeline succeeded if all stages reached insight_ready
+        insights_result = result.get("insights", {})
+        return insights_result.get("status") not in (None, "failed")
+
     def _get_company_name(self, stock_code: str) -> str:
         with self._store.conn() as c:
             row = c.execute(
