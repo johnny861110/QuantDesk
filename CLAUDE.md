@@ -88,3 +88,6 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總六�
 - [x] Phase 9：Multi-agent Debate（async Bull/Bear/PM + Supervisor.aggregate_debate()）
 - [x] Phase 10：React + TypeScript + SSE Dashboard（FastAPI backend + 豐富 UI）
 - [x] Phase 11：Agent 功能全面驗測與修復（全 6 agent 接線、debate method 修正、UI error card + elapsed time）
+- [x] Phase 12：Core Accuracy（FinMind IV 接入 risk agent、GDP/失業率 pp-fix、fred_adapter logging）
+- [x] Phase 13：Frontend Pro（recharts 圖表、hard constraints 明細、查詢歷史、JSON 匯出、重試、時間戳）
+- [x] Phase 14：Engineering Quality（E2E SSE 測試、CI frontend build、pytest-cov 覆蓋率）
