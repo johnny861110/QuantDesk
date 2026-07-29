@@ -266,6 +266,46 @@ def _parse_row(row: dict[str, Any], idx: int) -> Position:
     )
 
 
+def validate_portfolio_dict(data: dict[str, Any]) -> list[str]:
+    """
+    Validate a raw dict (e.g. an API PUT body) against the same rules used
+    when loading positions.yaml from disk, without writing anything.
+
+    Returns a list of human-readable error strings; empty means valid.
+    """
+    errors: list[str] = []
+
+    positions_raw = data.get("positions")
+    if not isinstance(positions_raw, list):
+        errors.append("positions must be a list")
+        positions_raw = []
+
+    for idx, row in enumerate(positions_raw):
+        if not isinstance(row, dict):
+            errors.append(f"[{idx}] position must be an object")
+            continue
+        errors.extend(_parse_row(row, idx).errors)
+
+    nav_section = data.get("portfolio_nav")
+    if not isinstance(nav_section, dict):
+        errors.append("portfolio_nav must be an object")
+    else:
+        try:
+            float(nav_section.get("value", 0.0))
+        except (TypeError, ValueError):
+            errors.append(
+                f"portfolio_nav.value={nav_section.get('value')!r} is not a valid number"
+            )
+        nav_currency = nav_section.get("currency", "TWD")
+        if nav_currency not in VALID_CURRENCIES:
+            errors.append(
+                f"portfolio_nav.currency={nav_currency!r} "
+                f"must be one of {sorted(VALID_CURRENCIES)}"
+            )
+
+    return errors
+
+
 def _require_str(
     row: dict[str, Any], key: str, idx: int, errors: list[str]
 ) -> str | None:
