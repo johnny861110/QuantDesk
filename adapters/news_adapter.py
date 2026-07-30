@@ -131,6 +131,9 @@ class NewsItem:
 
     confidence_tier : 1 (MOPS) / 2 (RSS) / 3 (Tavily) — 越低越可信
     is_official     : True = 公司正式公告（MOPS），False = 媒體報導 / 搜尋結果
+    published_at    : 一律為 naive UTC（不帶 tzinfo）。deduplicate_items() 會直接
+                      比較不同來源的 published_at，混入 tz-aware 值會丟出
+                      "can't compare offset-naive and offset-aware datetimes"。
     """
     title: str
     summary: str
@@ -521,7 +524,10 @@ def _parse_tavily_results(
                 except ValueError:
                     continue
         if pub_dt is None:
-            pub_dt = datetime.now(UTC)
+            # Naive UTC, matching MOPS/RSS — mixing aware and naive datetimes
+            # here raises "can't compare offset-naive and offset-aware
+            # datetimes" in deduplicate_items()'s published_at comparison.
+            pub_dt = datetime.now(UTC).replace(tzinfo=None)
 
         items.append(
             NewsItem(
