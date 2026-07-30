@@ -610,6 +610,28 @@ _VALID_AGENTS = {
     "cross_market", "fundamental", "risk",
 }
 
+# ─── Symbol Search ────────────────────────────────────────────────────────────
+
+@app.get("/api/symbols/search")
+async def search_symbols(q: str = "", limit: int = 20) -> list[dict[str, str]]:
+    """Search Taiwan stock symbols by code prefix or name substring.
+
+    Backs the sidebar's symbol search box so a single-agent run always has an
+    explicit, user-picked target instead of silently falling back to a
+    hardcoded default symbol.
+    """
+    from adapters.stock_info_adapter import StockInfoAdapter  # noqa: PLC0415
+
+    if not q.strip():
+        return []
+    adapter = StockInfoAdapter()
+    try:
+        results = await asyncio.to_thread(adapter.search, q, limit)
+    except Exception:
+        return []
+    return [{"symbol": s.stock_id, "name": s.stock_name} for s in results]
+
+
 # ─── Positions CRUD ───────────────────────────────────────────────────────────
 
 _POSITIONS_PATH = os.path.join(

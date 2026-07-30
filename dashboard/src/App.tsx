@@ -28,6 +28,7 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showPositions, setShowPositions] = useState(false)
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const { state, analyze, analyzeAgent, reset, retry } = useAnalysis()
   const { history, addQuery, clearHistory } = useQueryHistory()
@@ -74,14 +75,18 @@ export default function App() {
   const hasContent = state.router || Object.keys(state.agents).length > 0
   const activeTarget = state.router?.targets?.[0]
   const activeAgents = state.router?.agents ?? []
-  const currentSymbol = activeTarget ?? query.match(/\b(\d{4})\b/)?.[1] ?? '2330'
+  // Explicit user pick (sidebar search) wins; otherwise fall back to whatever
+  // the last completed analysis resolved. No hardcoded default symbol — if
+  // neither exists, single-agent runs are disabled until the user picks one.
+  const currentSymbol = selectedSymbol ?? activeTarget ?? null
 
   const handleRunAgent = useCallback((agentId: string, sym: string) => {
     analyzeAgent(agentId, sym)
   }, [analyzeAgent])
 
   const handleRunAll = useCallback(() => {
-    const q = query.trim() || `${currentSymbol} 完整分析`
+    const q = query.trim() || (currentSymbol ? `${currentSymbol} 完整分析` : '')
+    if (!q) return
     analyze(q)
   }, [query, currentSymbol, analyze])
 
@@ -93,6 +98,7 @@ export default function App() {
         agents={state.agents}
         activeAgents={activeAgents}
         symbol={currentSymbol}
+        onSymbolChange={setSelectedSymbol}
         onRunAgent={handleRunAgent}
         onRunAll={handleRunAll}
         collapsed={sidebarCollapsed}
