@@ -71,101 +71,136 @@ function formatVal(v: string | number | boolean | null): string {
   return String(v)
 }
 
-/** Expandable metadata panel showing all intermediate data */
-function MetadataPanel({ data }: { data: AgentPayload }) {
+/**
+ * Higher-precision variant for the "完整計算指標" detail view. Backend metrics
+ * are often unrounded floats (e.g. a division result with 15+ digits) — the
+ * old raw String(v) dump forced those into unreadable multi-line
+ * character-wraps in a narrow column. Round to 6 decimals and strip trailing
+ * zeros via the Number() round-trip, so it stays meaningfully more precise
+ * than the 2-decimal card summary without becoming an unbounded digit string.
+ */
+function formatValFull(v: string | number | boolean | null): string {
+  if (v === null) return '—'
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (typeof v === 'number') {
+    if (Math.abs(v) >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    if (Number.isInteger(v)) return String(v)
+    return String(Number(v.toFixed(6)))
+  }
+  return String(v)
+}
+
+/**
+ * Full-width metadata modal (overlay, not confined to the narrow card column).
+ * The old inline panel squeezed the value column into ~55% of an already
+ * narrow 3-column card and force-broke long numbers character-by-character
+ * (`break-all`) inside a fixed max-h-48 scroll box — unreadable in practice.
+ */
+function MetadataModal({ data, onClose }: { data: AgentPayload; onClose: () => void }) {
   const allFindings = Object.entries(data.key_findings)
   const hcs = data.hard_constraints ?? []
   const errs = data.errors ?? []
 
   return (
-    <div className="mt-3 rounded-lg border border-gray-700/60 bg-gray-900/80 text-xs">
-      {/* Data timestamp */}
-      {data.asof && (
-        <div className="flex items-center justify-between border-b border-gray-800 px-3 py-1.5">
-          <span className="text-gray-500">資料時間戳</span>
-          <span className="font-mono text-gray-400">{new Date(data.asof).toLocaleString('zh-TW')}</span>
-        </div>
-      )}
-
-      {/* Symbol / Market */}
-      {(data.symbol || data.market) && (
-        <div className="flex items-center gap-4 border-b border-gray-800 px-3 py-1.5">
-          {data.symbol && <><span className="text-gray-500">標的</span><span className="font-mono text-gray-300">{data.symbol}</span></>}
-          {data.market && <><span className="text-gray-500 ml-3">市場</span><span className="font-mono text-gray-300">{data.market}</span></>}
-        </div>
-      )}
-
-      {/* Full key_findings table */}
-      {allFindings.length > 0 && (
-        <div className="border-b border-gray-800">
-          <p className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-600">
-            完整計算指標 ({allFindings.length})
-          </p>
-          <div className="max-h-48 overflow-y-auto px-3 pb-2 space-y-1">
-            {allFindings.map(([k, v]) => (
-              <div key={k} className="flex items-start justify-between gap-2">
-                <span className="text-gray-500 font-mono shrink-0">{k}</span>
-                <span className="text-gray-300 font-mono text-right break-all max-w-[55%]">
-                  {v === null ? '—' : typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v)}
-                </span>
-              </div>
-            ))}
+    <>
+      <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-12 sm:pt-20">
+        <div className="w-full max-w-2xl rounded-xl border border-gray-700 bg-gray-950 shadow-2xl">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">{AGENT_ICON[data.agent] ?? '🤖'}</span>
+              <span className="text-sm font-bold text-white">
+                {AGENT_NAME[data.agent] ?? data.agent} · 中繼資料
+              </span>
+            </div>
+            <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-lg leading-none">×</button>
           </div>
-        </div>
-      )}
 
-      {/* Hard constraints */}
-      {hcs.length > 0 && (
-        <div className="border-b border-gray-800">
-          <p className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-600">
-            硬約束 ({hcs.length})
-          </p>
-          <div className="px-3 pb-2 space-y-1.5">
-            {hcs.map((hc, i) => (
-              <div key={i} className={`rounded px-2 py-1.5 ${hc.breached ? 'bg-red-950/60 border border-red-800/40' : 'bg-gray-800/60'}`}>
-                <div className="flex items-center justify-between">
-                  <span className={`font-mono font-bold ${hc.breached ? 'text-red-400' : 'text-gray-400'}`}>{hc.type}</span>
-                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${hc.breached ? 'bg-red-900/60 text-red-300' : 'bg-gray-700 text-gray-400'}`}>
-                    {hc.breached ? '⛔ BREACH' : '✓ OK'}
-                  </span>
+          <div className="max-h-[75vh] space-y-4 overflow-y-auto p-4 text-xs">
+            {/* Timestamp / symbol / market */}
+            {(data.asof || data.symbol || data.market) && (
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg bg-gray-900/60 px-3 py-2">
+                {data.asof && (
+                  <div><span className="text-gray-500">資料時間戳 </span><span className="font-mono text-gray-300">{new Date(data.asof).toLocaleString('zh-TW')}</span></div>
+                )}
+                {data.symbol && <div><span className="text-gray-500">標的 </span><span className="font-mono text-gray-300">{data.symbol}</span></div>}
+                {data.market && <div><span className="text-gray-500">市場 </span><span className="font-mono text-gray-300">{data.market}</span></div>}
+              </div>
+            )}
+
+            {/* Full key_findings table */}
+            {allFindings.length > 0 && (
+              <div>
+                <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-600">
+                  完整計算指標 ({allFindings.length})
+                </p>
+                <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1.5 rounded-lg bg-gray-900/60 px-3 py-2.5">
+                  {allFindings.map(([k, v]) => (
+                    <div key={k} className="contents">
+                      <span className="truncate font-mono text-gray-500">{k}</span>
+                      <span className="text-right font-mono text-gray-200">{formatValFull(v)}</span>
+                    </div>
+                  ))}
                 </div>
-                {(hc.current !== null || hc.limit !== null) && (
-                  <div className="mt-0.5 flex gap-3 text-[10px] text-gray-500">
-                    {hc.current !== null && <span>current: <span className="text-gray-300 font-mono">{typeof hc.current === 'number' ? hc.current.toFixed(4) : hc.current}</span></span>}
-                    {hc.limit !== null && <span>limit: <span className="text-gray-300 font-mono">{hc.limit}</span></span>}
-                  </div>
-                )}
-                {hc.detail && (
-                  <p className="mt-1 text-[10px] text-gray-600 leading-tight">{hc.detail}</p>
-                )}
               </div>
-            ))}
-          </div>
-        </div>
-      )}
+            )}
 
-      {/* Errors / warnings */}
-      {errs.length > 0 && (
-        <div className="px-3 py-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-gray-600 mb-1">
-            Pipeline 錯誤 / 警告 ({errs.length})
-          </p>
-          <div className="space-y-1">
-            {errs.map((e, i) => (
-              <p key={i} className="text-yellow-500/80 leading-relaxed break-all">{e}</p>
-            ))}
-          </div>
-        </div>
-      )}
+            {/* Hard constraints */}
+            {hcs.length > 0 && (
+              <div>
+                <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-600">
+                  硬約束 ({hcs.length})
+                </p>
+                <div className="space-y-1.5">
+                  {hcs.map((hc, i) => (
+                    <div key={i} className={`rounded px-3 py-2 ${hc.breached ? 'bg-red-950/60 border border-red-800/40' : 'bg-gray-900/60'}`}>
+                      <div className="flex items-center justify-between">
+                        <span className={`font-mono font-bold ${hc.breached ? 'text-red-400' : 'text-gray-400'}`}>{hc.type}</span>
+                        <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${hc.breached ? 'bg-red-900/60 text-red-300' : 'bg-gray-700 text-gray-400'}`}>
+                          {hc.breached ? '⛔ BREACH' : '✓ OK'}
+                        </span>
+                      </div>
+                      {(hc.current !== null || hc.limit !== null) && (
+                        <div className="mt-1 flex gap-4 text-[10px] text-gray-500">
+                          {hc.current !== null && <span>current: <span className="text-gray-300 font-mono">{typeof hc.current === 'number' ? hc.current.toFixed(4) : hc.current}</span></span>}
+                          {hc.limit !== null && <span>limit: <span className="text-gray-300 font-mono">{hc.limit}</span></span>}
+                        </div>
+                      )}
+                      {hc.detail && (
+                        <p className="mt-1 text-[10px] leading-relaxed text-gray-600">{hc.detail}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
-      {/* Received time */}
-      {data.receivedAt && (
-        <div className="flex items-center justify-between border-t border-gray-800 px-3 py-1.5">
-          <span className="text-gray-600">接收時間</span>
-          <span className="font-mono text-gray-600">{new Date(data.receivedAt).toLocaleTimeString()}</span>
+            {/* Errors / warnings */}
+            {errs.length > 0 && (
+              <div>
+                <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-600">
+                  Pipeline 錯誤 / 警告 ({errs.length})
+                </p>
+                <div className="space-y-1 rounded-lg bg-gray-900/60 px-3 py-2.5">
+                  {errs.map((e, i) => (
+                    <p key={i} className="break-words leading-relaxed text-yellow-500/80">{e}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Received time */}
+          {data.receivedAt && (
+            <div className="flex items-center justify-between border-t border-gray-800 px-4 py-2 text-[10px] text-gray-600">
+              <span>接收時間</span>
+              <span className="font-mono">{new Date(data.receivedAt).toLocaleTimeString()}</span>
+            </div>
+          )}
         </div>
-      )}
-    </div>
+      </div>
+    </>
   )
 }
 
@@ -324,7 +359,7 @@ export function AgentCard({ data, defaultExpanded = false }: Props) {
         </span>
       </button>
 
-      {showMeta && <MetadataPanel data={data} />}
+      {showMeta && <MetadataModal data={data} onClose={() => setShowMeta(false)} />}
     </div>
   )
 }
