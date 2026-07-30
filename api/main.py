@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -631,11 +631,39 @@ async def get_positions() -> Any:
 
 @app.put("/api/positions")
 async def put_positions(body: dict[str, Any]) -> dict[str, str]:
-    """Write updated positions back to positions.yaml."""
-    import yaml  # noqa: PLC0415
+    """Validate and write updated positions back to positions.yaml.
+
+    Uses a round-trip YAML loader so existing header/field comments in the
+    file survive the rewrite, and writes atomically (temp file + rename) so a
+    crash mid-write can never leave positions.yaml truncated or malformed —
+    this file is read fresh by the risk agent's hard-constraint gate on every
+    run, so a corrupt write silently defeats that constitutional safeguard.
+    """
+    from ruamel.yaml import YAML  # noqa: PLC0415
+
+    from agents.risk.position_loader import validate_portfolio_dict  # noqa: PLC0415
+
+    errors = validate_portfolio_dict(body)
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+
+    yaml_rt = YAML()
+    yaml_rt.preserve_quotes = True
+
     path = os.path.abspath(_POSITIONS_PATH)
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(body, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    doc: dict[str, Any] = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            doc = yaml_rt.load(f) or {}
+
+    doc["portfolio_nav"] = body["portfolio_nav"]
+    doc["positions"] = body["positions"]
+
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        yaml_rt.dump(doc, f)
+    os.replace(tmp_path, path)
+
     return {"status": "ok"}
 
 

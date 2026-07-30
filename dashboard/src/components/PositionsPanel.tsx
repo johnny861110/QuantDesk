@@ -4,7 +4,7 @@
  * GET /api/positions  → load current portfolio
  * PUT /api/positions  → save changes back to positions.yaml
  */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -242,52 +242,80 @@ export function PositionsPanel({ onClose }: Props) {
 
   useEffect(() => { load() }, [load])
 
-  const save = async (d: PortfolioData) => {
+  // Serializes all writes onto one promise chain so overlapping saves land on
+  // the server in submission order — otherwise two in-flight PUTs (each a
+  // full-document overwrite) can resolve out of order and the earlier one's
+  // stale payload silently clobbers the later one's.
+  const saveChain = useRef<Promise<void>>(Promise.resolve())
+
+  const queueSave = useCallback((d: PortfolioData) => {
     setSaving(true)
     setSaveMsg('')
-    try {
-      await fetch('/api/positions', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(d),
+    saveChain.current = saveChain.current
+      .catch(() => {})
+      .then(async () => {
+        const resp = await fetch('/api/positions', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(d),
+        })
+        if (!resp.ok) throw new Error(await resp.text())
+        setSaveMsg('✓ 已儲存')
+        setTimeout(() => setSaveMsg(''), 2000)
       })
-      setSaveMsg('✓ 已儲存')
-      setTimeout(() => setSaveMsg(''), 2000)
-    } catch {
-      setSaveMsg('✗ 儲存失敗')
-    } finally {
-      setSaving(false)
-    }
-  }
+      .catch(() => setSaveMsg('✗ 儲存失敗'))
+      .finally(() => setSaving(false))
+  }, [])
 
   const handleSavePosition = (pos: Position) => {
-    if (!data) return
-    const positions = [...data.positions]
-    if (editIndex === -1) {
-      positions.push(pos)
-    } else if (editIndex !== null) {
-      positions[editIndex] = pos
-    }
-    const next = { ...data, positions }
-    setData(next)
-    save(next)
+    setData(prev => {
+      if (!prev) return prev
+      const positions = [...prev.positions]
+      if (editIndex === -1) {
+        positions.push(pos)
+      } else if (editIndex !== null) {
+        positions[editIndex] = pos
+      }
+      const next = { ...prev, positions }
+      queueSave(next)
+      return next
+    })
     setShowModal(false)
     setEditIndex(null)
   }
 
   const handleDelete = (i: number) => {
-    if (!data) return
-    const positions = data.positions.filter((_, idx) => idx !== i)
-    const next = { ...data, positions }
-    setData(next)
-    save(next)
+    setData(prev => {
+      if (!prev) return prev
+      const positions = prev.positions.filter((_, idx) => idx !== i)
+      const next = { ...prev, positions }
+      queueSave(next)
+      return next
+    })
   }
 
+  // NAV is a free-typed number input — debounce so each keystroke doesn't
+  // fire its own full-document PUT.
+  const navDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const handleNavChange = (value: number) => {
-    if (!data) return
-    const next = { ...data, portfolio_nav: { ...data.portfolio_nav, value } }
-    setData(next)
-    save(next)
+    setData(prev => (prev ? { ...prev, portfolio_nav: { ...prev.portfolio_nav, value } } : prev))
+    if (navDebounceRef.current) clearTimeout(navDebounceRef.current)
+    navDebounceRef.current = setTimeout(() => {
+      setData(prev => {
+        if (prev) queueSave(prev)
+        return prev
+      })
+    }, 500)
+  }
+
+  const handleNavCurrencyChange = (currency: string) => {
+    setData(prev => {
+      if (!prev) return prev
+      const next = { ...prev, portfolio_nav: { ...prev.portfolio_nav, currency } }
+      queueSave(next)
+      return next
+    })
   }
 
   return (
@@ -321,12 +349,7 @@ export function PositionsPanel({ onClose }: Props) {
               <span className="text-xs text-gray-600">{data.portfolio_nav.currency}</span>
               <select
                 value={data.portfolio_nav.currency}
-                onChange={e => {
-                  if (!data) return
-                  const next = { ...data, portfolio_nav: { ...data.portfolio_nav, currency: e.target.value } }
-                  setData(next)
-                  save(next)
-                }}
+                onChange={e => handleNavCurrencyChange(e.target.value)}
                 className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-white outline-none focus:border-blue-500"
               >
                 {['TWD', 'USD'].map(c => <option key={c} value={c}>{c}</option>)}

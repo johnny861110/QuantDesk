@@ -23,6 +23,7 @@ dependencies = [
     "fastapi>=0.139.2",
     "uvicorn[standard]>=0.51.0",
     "cachetools>=7.1.4",
+    "ruamel-yaml>=0.19.1",
 ]
 [dependency-groups]
 dev = [
