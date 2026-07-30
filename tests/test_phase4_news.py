@@ -8,6 +8,7 @@ CI does not need TAVILY_API_KEY or OPENAI_API_KEY to run these tests.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -689,6 +690,44 @@ def _make_mock_llm_analysis(signal_direction: str = "positive_surprise") -> Magi
         "overall_summary": "整體新聞面偏多，無數字。",
     }
     return _make_mock_openai(response)
+
+
+class _SlowAdapter:
+    """Sleeps to simulate real network latency, so parallel vs sequential
+    fetch is observable via wall-clock time."""
+
+    def __init__(self, name: str, delay: float = 0.2) -> None:
+        self.source_name = name
+        self._delay = delay
+
+    def fetch(self, **kwargs: Any) -> SourcedData:
+        time.sleep(self._delay)
+        return SourcedData(
+            payload=NewsResult(items=[], symbol="2330.TW", fetched_at=NOW),
+            source=self.source_name,
+            asof=NOW,
+        )
+
+
+def test_fetch_all_runs_adapters_in_parallel() -> None:
+    """Regression: MOPS/RSS/Tavily must run concurrently. Sequential fetches
+    were the dominant cost pushing the pipeline past api/main.py's 45s
+    per-agent timeout (observed 15-25s combined in production)."""
+    mock_client = _make_mock_openai({"articles": [], "overall_summary": "測試"})
+    delay = 0.2
+    start = time.time()
+    run_news_agent(
+        symbol="2330.TW",
+        market="TW",
+        mops_adapter=_SlowAdapter("slow_mops", delay),      # type: ignore[arg-type]
+        rss_adapter=_SlowAdapter("slow_rss", delay),        # type: ignore[arg-type]
+        tavily_adapter=_SlowAdapter("slow_tavily", delay),  # type: ignore[arg-type]
+        openai_client=mock_client,
+        asof=NOW,
+    )
+    elapsed = time.time() - start
+    # Sequential would take >= 3 * delay (0.6s); parallel stays near 1 * delay.
+    assert elapsed < delay * 2, f"fetch_all took {elapsed:.2f}s — adapters may be running sequentially"
 
 
 class TestFullPipeline:
