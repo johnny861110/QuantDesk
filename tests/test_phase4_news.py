@@ -752,6 +752,84 @@ class TestFullPipeline:
         assert 0.0 <= dq.confidence <= 1.0
 
 
+# ─── LLM article cap (timeout regression) ────────────────────────────────────
+# A high-volume symbol can dedupe to 50+ articles in one LLM call, observed
+# taking ~44s — right at api/main.py's 45s per-agent timeout. _node_llm_analyse
+# must cap the prompt to _MAX_LLM_ARTICLES regardless of how many articles
+# survive dedup.
+
+
+class EmptyMopsAdapter:
+    source_name = "empty_mops"
+
+    def fetch(self, **kwargs: Any) -> SourcedData:
+        return SourcedData(
+            payload=NewsResult(items=[], symbol="2330.TW", fetched_at=NOW),
+            source="empty_mops",
+            asof=NOW,
+        )
+
+
+class ManyDistinctItemsRSSAdapter:
+    """Returns 25 articles with unrelated titles — none get merged by dedup."""
+
+    source_name = "many_rss"
+
+    def fetch(self, **kwargs: Any) -> SourcedData:
+        topics = [
+            "資本支出", "先進製程", "海外設廠", "客戶訂單", "股東會",
+            "法人說明會", "供應鏈調整", "產能利用率", "研發投資", "配息政策",
+            "人事異動", "碳中和計畫", "專利訴訟", "匯率避險", "庫存調整",
+            "價格調漲", "良率改善", "設備採購", "工會協商", "永續報告",
+            "併購傳聞", "董事會決議", "信用評等", "現金增資", "廠房擴建",
+        ]
+        items = [
+            NewsItem(
+                title=f"台積電{topic}",
+                summary=f"關於{topic}的詳細說明內容第{i}篇",
+                url=f"https://example.com/{i}",
+                published_at=NOW,
+                source_name="many_rss",
+                confidence_tier=TIER_RSS,
+                is_official=False,
+            )
+            for i, topic in enumerate(topics)
+        ]
+        return SourcedData(
+            payload=NewsResult(items=items, symbol="2330.TW", fetched_at=NOW),
+            source="many_rss",
+            asof=NOW,
+        )
+
+
+class TestLlmArticleCap:
+    def test_llm_prompt_capped_even_with_many_dedup_items(self) -> None:
+        from agents.news_agent import _MAX_LLM_ARTICLES
+
+        mock_client = _make_mock_openai({"articles": [], "overall_summary": "測試"})
+        sig = run_news_agent(
+            symbol="2330.TW",
+            market="TW",
+            query_terms=["台積電"],
+            mops_adapter=EmptyMopsAdapter(),                # type: ignore[arg-type]
+            rss_adapter=ManyDistinctItemsRSSAdapter(),       # type: ignore[arg-type]
+            openai_client=mock_client,
+            asof=NOW,
+        )
+
+        dedup_count = sig.metrics["dedup_article_count"]
+        assert dedup_count > _MAX_LLM_ARTICLES, (
+            "test setup requires more surviving articles than the cap"
+        )
+        assert sig.metrics["llm_analysed_article_count"] == _MAX_LLM_ARTICLES
+
+        call_args = mock_client.chat.completions.create.call_args
+        messages = call_args.kwargs.get("messages") or call_args.args[0]
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        assert f"以下 {_MAX_LLM_ARTICLES} 篇新聞" in user_msg
+        assert f"以下 {dedup_count} 篇新聞" not in user_msg
+
+
 # ─── Prompt injection integration ────────────────────────────────────────────
 
 
