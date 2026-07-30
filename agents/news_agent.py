@@ -51,9 +51,11 @@ TAVILY_API_KEY  — read by TavilyNewsAdapter at fetch time; missing = RuntimeEr
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, Optional, TypedDict
 
@@ -465,56 +467,75 @@ def _lf_check_narrative(narrative: str, metrics: dict[str, Any]) -> list[str]:
 
 @observe(name="news_agent:node_fetch_all")  # type: ignore[misc]
 def _node_fetch_all(state: NewsAgentState) -> NewsAgentState:
-    """Fetch news from all three adapters; failures are non-fatal."""
+    """Fetch news from all three adapters in parallel; failures are non-fatal.
+
+    MOPS/RSS/Tavily are independent network calls with no data dependency on
+    each other, but ran sequentially — observed taking 15-25s combined
+    against api/main.py's 45s per-agent budget, leaving little margin for the
+    LLM analysis step and causing intermittent "timeout after 45s" failures.
+    Running them concurrently collapses this node's cost to roughly the
+    slowest single fetch instead of their sum.
+
+    Each worker runs via its own contextvars.copy_context().run(fn) so the
+    active Langfuse span propagates into the thread — plain
+    ThreadPoolExecutor.submit() does not inherit contextvars, which would
+    otherwise orphan the fetch_mops/fetch_rss/fetch_tavily spans outside this
+    node's trace. A single Context object can't be entered from more than one
+    thread concurrently, so each fetcher needs its own copy, not a shared one.
+    """
     symbol = state["symbol"]
     days_back = state["days_back"]
     terms = state["query_terms"] or [symbol]
     errors = list(state["pipeline_errors"])
-    all_items: list[NewsItem] = []
 
-    # ① MOPS (公開資訊觀測站)
     mops = state["mops_adapter"] or MopsNewsAdapter()
-    try:
-        sourced = _lf_fetch_mops(mops, symbol=symbol, days_back=days_back)
-        result: NewsResult = sourced.payload
-        # Injection check on official disclosures (best-effort)
-        for item in result.items:
-            warnings = _lf_check_injection(item.title + " " + item.summary)
-            if warnings:
-                errors.extend(warnings)
-            else:
-                all_items.append(item)
-    except Exception as exc:
-        errors.append(f"MOPS fetch failed: {exc}")
-
-    # ② RSS
     rss = state["rss_adapter"] or RSSNewsAdapter()
-    try:
-        sourced_rss = _lf_fetch_rss(rss, symbol=symbol, query_terms=terms, days_back=days_back)
-        rss_result: NewsResult = sourced_rss.payload
-        for item in rss_result.items:
+    tavily = state["tavily_adapter"]
+
+    def _fetch_mops() -> tuple[str | None, list[NewsItem]]:
+        try:
+            sourced = _lf_fetch_mops(mops, symbol=symbol, days_back=days_back)
+            result: NewsResult = sourced.payload
+            return None, result.items
+        except Exception as exc:
+            return f"MOPS fetch failed: {exc}", []
+
+    def _fetch_rss() -> tuple[str | None, list[NewsItem]]:
+        try:
+            sourced = _lf_fetch_rss(rss, symbol=symbol, query_terms=terms, days_back=days_back)
+            result: NewsResult = sourced.payload
+            return None, result.items
+        except Exception as exc:
+            return f"RSS fetch failed: {exc}", []
+
+    def _fetch_tavily() -> tuple[str | None, list[NewsItem]]:
+        try:
+            sourced = _lf_fetch_tavily(tavily, symbol=symbol, query_terms=terms)
+            result: NewsResult = sourced.payload
+            return None, result.items
+        except Exception as exc:
+            return f"Tavily fetch failed: {exc}", []
+
+    fetchers = [_fetch_mops, _fetch_rss]
+    if tavily is not None:
+        fetchers.append(_fetch_tavily)
+
+    # Each thread needs its OWN context copy — a single Context can't be
+    # entered (i.e. have .run() active) from more than one thread at once.
+    with ThreadPoolExecutor(max_workers=len(fetchers)) as pool:
+        futures = [pool.submit(contextvars.copy_context().run, fn) for fn in fetchers]
+        results = [f.result() for f in futures]
+
+    all_items: list[NewsItem] = []
+    for err, items in results:
+        if err:
+            errors.append(err)
+        for item in items:
             warnings = _lf_check_injection(item.title + " " + item.summary)
             if warnings:
                 errors.extend(warnings)
             else:
                 all_items.append(item)
-    except Exception as exc:
-        errors.append(f"RSS fetch failed: {exc}")
-
-    # ③ Tavily (補充查詢，可選)
-    tavily = state["tavily_adapter"]
-    if tavily is not None:
-        try:
-            sourced_tv = _lf_fetch_tavily(tavily, symbol=symbol, query_terms=terms)
-            tv_result: NewsResult = sourced_tv.payload
-            for item in tv_result.items:
-                warnings = _lf_check_injection(item.title + " " + item.summary)
-                if warnings:
-                    errors.extend(warnings)
-                else:
-                    all_items.append(item)
-        except Exception as exc:
-            errors.append(f"Tavily fetch failed: {exc}")
 
     update_current_span(output={"raw_item_count": len(all_items), "errors": len(errors)})
     return {**state, "raw_items": all_items, "pipeline_errors": errors}
