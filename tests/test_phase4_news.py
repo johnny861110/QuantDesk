@@ -276,15 +276,35 @@ def test_parse_tavily_results_fallback_date() -> None:
     raw = [{"title": "Some news", "url": "https://x.com", "content": "text"}]
     items = _parse_tavily_results(raw, "2330.TW")
     assert len(items) == 1
-    # fallback date is datetime.now(UTC); should be very recent
+    # Fallback date must be naive UTC — matching MOPS/RSS — so
+    # deduplicate_items() can compare published_at across sources without
+    # raising "can't compare offset-naive and offset-aware datetimes".
     pub = items[0].published_at
-    now_aware = datetime.now(timezone.utc)
-    # Make both comparable (tz-aware or both naive)
-    if pub.tzinfo is not None:
-        delta = (now_aware - pub).total_seconds()
-    else:
-        delta = (now_aware.replace(tzinfo=None) - pub).total_seconds()
+    assert pub.tzinfo is None
+    delta = (datetime.now(timezone.utc).replace(tzinfo=None) - pub).total_seconds()
     assert abs(delta) < 10
+
+
+def test_deduplicate_items_compares_mixed_source_published_at() -> None:
+    """Regression: a MOPS/RSS naive item next to a Tavily fallback item must
+    not raise on published_at comparison in deduplicate_items()."""
+    from agents.news_agent import deduplicate_items
+
+    naive_item = NewsItem(
+        title="TSMC 法說會",
+        summary="s",
+        url="https://x.com/1",
+        published_at=datetime(2026, 7, 30, 10, 0, 0),
+        source_name="mops",
+        confidence_tier=TIER_MOPS,
+        is_official=True,
+    )
+    tavily_fallback = _parse_tavily_results(
+        [{"title": "TSMC 財報快訊", "url": "https://x.com/2", "content": "c"}], "2330.TW"
+    )[0]
+
+    result = deduplicate_items([naive_item, tavily_fallback])
+    assert len(result) == 2
 
 
 # ─── MopsNewsAdapter (monkeypatched) ─────────────────────────────────────────
