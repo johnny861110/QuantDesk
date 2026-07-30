@@ -101,6 +101,13 @@ DEDUP_THRESHOLD: float = 0.50
 # LLM model for news analysis (cost-efficient; can be overridden via env)
 _DEFAULT_LLM_MODEL: str = "gpt-4o-mini"
 
+# Max articles sent to the LLM in one call. dedup_items is sorted by
+# confidence_tier then recency, so this keeps the most authoritative/freshest
+# coverage. Without a cap, a high-volume symbol can dedupe to 50+ articles in
+# one prompt — observed taking ~44s, right at the API-layer per-agent
+# _AGENT_TIMEOUT (45s in api/main.py), causing intermittent timeouts.
+_MAX_LLM_ARTICLES: int = 20
+
 # Financial implication labels returned by LLM analysis
 _IMPLICATION_SCORE: dict[str, float] = {
     "positive_surprise": +1.0,
@@ -528,8 +535,16 @@ def _node_deduplicate(state: NewsAgentState) -> NewsAgentState:
 
 @observe(name="news_agent:node_llm_analyse")  # type: ignore[misc]
 def _node_llm_analyse(state: NewsAgentState) -> NewsAgentState:
-    """Call LLM to get per-article financial implication labels."""
-    items = state["dedup_items"]
+    """Call LLM to get per-article financial implication labels.
+
+    Only the first _MAX_LLM_ARTICLES (already sorted by confidence_tier then
+    recency in _node_deduplicate) go into the prompt — see _MAX_LLM_ARTICLES
+    docstring for why. Scoring in _node_build_signal still runs over the full
+    dedup_items list; articles beyond this cap simply have no LLM-assigned
+    implication and contribute a neutral (0) score, same as if the LLM had
+    omitted them from its response.
+    """
+    items = state["dedup_items"][:_MAX_LLM_ARTICLES]
     errors = list(state["pipeline_errors"])
 
     if not items:
@@ -662,6 +677,7 @@ def _node_build_signal(state: NewsAgentState) -> NewsAgentState:
     metrics: dict[str, Any] = {
         "raw_article_count":   len(raw_items),
         "dedup_article_count": len(dedup_items),
+        "llm_analysed_article_count": min(len(dedup_items), _MAX_LLM_ARTICLES),
         "has_official_disclosure": has_official,
         "weighted_sentiment_score": weighted_score,
         "source_tiers":        sorted({i.confidence_tier for i in dedup_items}),
