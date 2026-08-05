@@ -7,6 +7,47 @@
 
 ---
 
+> ## ⚠️ 執行結果與 Phase D 放棄決策（2026-08-05 加註）
+>
+> **本文的目標架構只執行了一部分。以下為實際落地狀況，動工前務必先讀這段。**
+>
+> ### 已執行 ✅
+> | 本文章節 | 落地狀況 |
+> |---|---|
+> | §三 資料源綁定地圖（Phase A） | ✅ FinMind / FRED / Tavily 皆已接通 |
+> | §五 Router Layer（Phase B） | ✅ `router/intent_router.py`，LLM + keyword fallback |
+> | §六 Chip Agent（Phase C） | ✅ `agents/chip_agent.py` |
+> | §七 Synthesis LLM（Phase E） | ✅ `supervisor/synthesis.py` |
+>
+> ### 已正式放棄 ❌ —— Phase D「各 Agent ReAct 化」
+>
+> 本文 §十二 當初即判定 Phase D「最費工，但有了前三步系統已可實用」而排在最後，
+> 實際上**從未執行**。2026-08-05 正式拍板**放棄**，不再列為待辦。
+>
+> **因此現況與本文 §二 目標架構圖的差異**：
+> - 圖中「7 個 ReAct Agent」→ 實際 **0 個** 是 ReAct。七個 agent 都是純線性
+>   `StateGraph`（fetch → compute → signal），全專案 `add_conditional_edges` 數為 **0**。
+> - 圖中所有 agent 輸出 `DomainReport` → 實際**只有 `chip_agent`**。其餘六個仍輸出
+>   `AgentSignal`，chip 的 `DomainReport` 經 `domain_report_to_agent_signal()` 橋接回來。
+> - §四 `ReasoningStep.thought` 註解寫「LLM 的推理」→ 實際是**寫死的確定性字串**，
+>   無 LLM 參與（已於 `schemas/domain_report.py` 更正註解）。
+>
+> **放棄理由**：
+> 1. 成本效益不成立——要動七個 agent 及其全部測試（約 5 天），
+>    但功能產出為零：現有確定性 pipeline 已能穩定產出正確結果。
+> 2. 與 `CLAUDE.md` 設計原則①衝突風險——ReAct loop 讓 LLM 自主決定下一步，
+>    而本專案的核心約束是「LLM 不產出數字、不自由裁量」。確定性 pipeline
+>    反而更能保證這條原則。
+> 3. `AgentSignal` 已是六個 agent 的穩定共同契約，貿然遷移會破壞既有測試資產。
+>
+> **拍板結論**：`AgentSignal` 為唯一跨 agent 契約，`DomainReport` 凍結為 chip agent
+> 專用擴充。詳見 `CLAUDE.md` 架構鐵則「雙 schema 邊界」。
+>
+> **本文剩餘價值**：§一 問題診斷、§三 資料源地圖、§十 後向相容邊界、§十一 技術決策記錄
+> 仍然有效且值得參考。§二 目標架構圖與 §六 各 agent ReAct 重構細節請視為**未採用的設計備案**。
+
+---
+
 ## 一、問題診斷：為什麼現在的系統沒有意義
 
 ### 1.1 現況

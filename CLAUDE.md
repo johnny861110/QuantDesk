@@ -3,9 +3,12 @@
 > 這是本 repo 的憲法。每個 session、每個 subagent 都必須遵守。違反以下任一條，即為錯誤實作。
 
 ## 專案是什麼
-QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總六個獨立的 domain agent
-（risk / technical / fundamental / news / macro / cross_market），可個別使用，
+QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七個獨立的 domain agent
+（risk / technical / fundamental / news / macro / cross_market / chip），可個別使用，
 也可匯總成綜合投資評估。完整規格見 `docs/spec.md`。
+
+> ⚠️ `docs/spec.md` 為 v1.0 原始藍圖，寫於 chip agent（Phase 7 新增）之前，
+> 全篇以「六大 domain agent」描述。閱讀時以本檔與 `README.md` 為準。
 
 ## 三條不可違反的設計原則
 1. **確定性計算與 LLM 嚴格分離**：Greeks、財務指標、技術指標、統計量一律由純函數
@@ -20,8 +23,17 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總六�
    的 `AgentSignal`，且 `key_evidence` 每一項都要有 `source` 與 `asof`。
 
 ## 架構鐵則
-- 框架：**LangGraph**。每個 domain agent 是一個 node，Supervisor 是編排 graph。
+- 框架：**LangGraph**。每個 domain agent 內部是一張 `StateGraph`（fetch → compute → signal）。
+- **Supervisor 刻意「不」使用 `StateGraph`**：`supervisor/graph.py` 是純 Python 三層規則引擎
+  （檔名沿用歷史命名，內容無任何 `add_node`）。理由是設計原則②要求 hard_constraint
+  強制降級由規則引擎執行、不得被 LLM 自由裁量——用純函式而非 graph node，
+  可確保這條路徑不會被圖的條件路由或 LLM 悄悄繞過。**不要在 Supervisor 裡加 LangGraph node**。
 - 所有 domain agent 都輸出 `AgentSignal`（見 schema），**絕不輸出自由文字給 Supervisor**。
+- **雙 schema 邊界（2026-08-05 拍板凍結）**：`schemas/agent_signal.py` 的 `AgentSignal`
+  是唯一的跨 agent 共同契約。`schemas/domain_report.py` 的 `DomainReport` 僅
+  `chip_agent` 使用，經 `domain_report_to_agent_signal()` 橋接回 `AgentSignal` 才進 Supervisor。
+  `docs/refactor_plan.md` 原規劃的「七個 agent 全面 ReAct 化 / 全面改用 DomainReport」
+  （該文 Phase D）**已正式放棄**，不要再依該文件的目標架構動工。理由見 refactor_plan.md 開頭註記。
 - 所有外部資料存取都走 `adapters/` 的抽象介面，**agent 內不得直接呼叫外部 API**
   （不得在 agent 裡直接 import yfinance / requests 打新聞站）。
 - 新增一個 domain agent **不得修改 Supervisor 核心**——只能新增 node 並註冊。
@@ -91,3 +103,56 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總六�
 - [x] Phase 12：Core Accuracy（FinMind IV 接入 risk agent、GDP/失業率 pp-fix、fred_adapter logging）
 - [x] Phase 13：Frontend Pro（recharts 圖表、hard constraints 明細、查詢歷史、JSON 匯出、重試、時間戳）
 - [x] Phase 14：Engineering Quality（E2E SSE 測試、CI frontend build、pytest-cov 覆蓋率）
+- [x] Phase 15：Query-Type Routing + Async 重構 + 新聞修復 + AgentSidebar / PositionsPanel
+- [ ] Phase 16：Truth & Correctness（文件真實性對帳 + chip Verifier + 測試隔離 +
+      SDK 統一/Langfuse cost + query_type 個股/組合切分）— 計畫見 `docs/tasks/phase_16.md`
+- [ ] Phase 17：Evaluation Framework（prompt 快照 / router golden set /
+      supervisor 資料驅動情境 / narrative faithfulness）— 兌現 `docs/spec.md §8.2`
+
+> 測試基準：**888 passed / 1 skipped**、覆蓋率 85%（2026-08-05 實測）。
+> 修改此數字前請先實跑 `uv run pytest -q --cov`，不要沿用舊值。
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **QuantDesk** (3863 symbols, 7770 relationships, 214 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/QuantDesk/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/QuantDesk/clusters` | All functional areas |
+| `gitnexus://repo/QuantDesk/processes` | All execution flows |
+| `gitnexus://repo/QuantDesk/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

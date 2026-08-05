@@ -8,7 +8,7 @@ DomainReport — Agentic 架構的 domain agent 輸出格式。
   - narrative 是模板字串，不帶 LLM 思考步驟
   - 無 scenario 路由資訊
 
-DomainReport 為 ReAct 架構設計，記錄推理步驟和結構化發現，
+DomainReport 記錄分析步驟和結構化發現，
 供 Synthesis LLM 閱讀後做跨 domain 整合判斷。
 
 向後相容
@@ -16,6 +16,16 @@ DomainReport 為 ReAct 架構設計，記錄推理步驟和結構化發現，
 AgentSignal 保留不動，DomainReport 新增。
 domain_report_to_agent_signal() 提供橋接轉換，
 讓 Supervisor 既有邏輯（hard_constraint 規則引擎）仍可運作。
+
+⚠️ 使用範圍（2026-08-05 拍板凍結）
+----------------------------------
+`AgentSignal` 是唯一的跨 agent 共同契約；**`DomainReport` 目前僅由
+`agents/chip_agent.py` 使用**，其餘六個 domain agent 直接輸出 AgentSignal。
+
+`docs/refactor_plan.md` 原規劃的「七個 agent 全面 ReAct 化 / 全面改用
+DomainReport」（該文 Phase D）**已正式放棄**——現況不是遷移到一半，
+是刻意停在此處。新增 agent 請輸出 AgentSignal，不要擴大 DomainReport 的使用範圍。
+理由見 refactor_plan.md 開頭註記與 CLAUDE.md「雙 schema 邊界」。
 """
 from __future__ import annotations
 
@@ -29,18 +39,26 @@ if TYPE_CHECKING:
     from schemas.agent_signal import AgentSignal
 
 
-# ─── ReAct 推理步驟 ───────────────────────────────────────────────────────────
+# ─── 分析步驟記錄 ─────────────────────────────────────────────────────────────
 
 
 @dataclass
 class ReasoningStep:
     """
-    ReAct loop 中一個 Thought-Action-Observation 循環的紀錄。
+    一個「說明-動作-觀察」步驟的紀錄，形式借用 ReAct 的 Thought-Action-Observation。
+
+    ⚠️ **這不是 LLM 產生的推理**。目前唯一的產生者 `agents/chip_agent.py`
+    是確定性 pipeline：`thought` 是開發者寫死的中文說明字串，
+    `action` 是被呼叫的 Python 函式名，`observation` 是格式化後的計算結果。
+    無任何 LLM 參與此結構的生成。
+
+    保留此結構的價值在於「可稽核的計算軌跡」（哪一步算了什麼、得到什麼），
+    符合設計原則③；但不要把它當作 agent 具備自主推理能力的證據。
 
     Fields
     ------
-    thought     : LLM 的推理文字（分析為何要呼叫此工具）
-    action      : 呼叫的工具名稱
+    thought     : 此步驟在做什麼、為何要做（確定性文字，非 LLM 生成）
+    action      : 呼叫的工具 / 函式名稱
     action_input: 工具的輸入參數（dict）
     observation : 工具回傳的結果（摘要文字，不含原始大 payload）
     """
