@@ -304,7 +304,7 @@ def _determine_chip_signal(
 # ─── LLM 摘要層 ──────────────────────────────────────────────────────────────
 
 
-@observe(name="chip_agent:llm_synthesize", as_type="generation")  # type: ignore[misc]
+@observe(name="chip_agent:llm_synthesize")  # type: ignore[misc]
 def _llm_synthesize_chip(
     symbol: str,
     signal: Signal,
@@ -326,7 +326,7 @@ def _llm_synthesize_chip(
     失敗時 fallback 至確定性模板（不影響 signal 輸出）。
     """
     try:
-        from openai import OpenAI
+        from langfuse.openai import OpenAI
 
         client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 

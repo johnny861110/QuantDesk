@@ -28,7 +28,19 @@ import os
 # 3 個 demo script），不會覆蓋已存在的值，故此設定能存活到測試結束。
 #
 # 若要在本機手動驗證 Langfuse trace，請直接跑 demo script，不要跑 pytest。
+#
+# ⚠️ 需要**兩道**閘門，它們是不同機制：
+#   LANGFUSE_ENABLED         —— 本專案自訂，只管 observability/langfuse_setup.py
+#                               要不要把 observe 綁成真的 langfuse observe。
+#   LANGFUSE_TRACING_ENABLED —— Langfuse SDK 官方開關。agents 用的
+#                               `from langfuse.openai import OpenAI` drop-in
+#                               是 SDK 內建的自動 instrumentation，**完全不看**
+#                               我們自訂的 LANGFUSE_ENABLED，只要 .env 有
+#                               PUBLIC_KEY/SECRET_KEY 就會嘗試上傳並在
+#                               process 結束時逾時。少了這道會讓
+#                               "Failed to export span batch" 重新出現。
 os.environ["LANGFUSE_ENABLED"] = "false"
+os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
 
 from typing import Any  # noqa: E402
 

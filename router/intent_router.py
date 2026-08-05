@@ -106,13 +106,13 @@ _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使
 # ─── LLM-based router ────────────────────────────────────────────────────────
 
 
-@observe(name="router:classify_intent", as_type="generation")  # type: ignore[misc]
+@observe(name="router:classify_intent")  # type: ignore[misc]
 def _llm_classify(query: str) -> dict[str, Any]:
     """
     呼叫 GPT-4o-mini 做意圖分類，回傳 dict（JSON 解析後）。
     失敗時 raise，由 route() 捕捉並使用 fallback。
     """
-    from openai import OpenAI
+    from langfuse.openai import OpenAI
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
     resp = client.chat.completions.create(

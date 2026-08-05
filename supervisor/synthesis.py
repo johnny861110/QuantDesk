@@ -158,13 +158,13 @@ def _build_reports_context(reports: list[DomainReport], symbol: str, scenario: s
     return "\n".join(lines)
 
 
-@observe(name="synthesis:llm_call", as_type="generation")  # type: ignore[misc]
+@observe(name="synthesis:llm_call")  # type: ignore[misc]
 def _call_synthesis_llm(context: str) -> dict[str, Any]:
     """
     呼叫 GPT-4o 做跨 domain 仲裁推理。
     失敗時 raise，由 synthesize_reports() 捕捉並使用 fallback。
     """
-    from openai import OpenAI
+    from langfuse.openai import OpenAI
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
     resp = client.chat.completions.create(
