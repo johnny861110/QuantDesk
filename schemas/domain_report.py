@@ -150,7 +150,8 @@ class RouterOutput:
     # ── 新增：查詢類型與 agent 路由 ──────────────────────────────────────────
     query_type: Literal[
         "stock_analysis",       # 個股技術/籌碼/新聞分析
-        "investment_strategy",  # 投資建議、值不值得買 → 全 agent + Debate
+        "stock_investment",     # 個股投資建議「值不值得買」→ 六 agent（無 risk）+ Debate
+        "investment_strategy",  # 組合層策略調整 → 全 agent（含 risk）+ Debate
         "fundamental_review",   # 財報、EPS、ROE → fundamental + chip
         "macro_outlook",        # 總經、利率、通膨 → macro + cross_market
         "portfolio_risk",       # 組合風控、Greeks → risk only

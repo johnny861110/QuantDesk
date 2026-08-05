@@ -42,10 +42,20 @@ React + TypeScript SSE Dashboard（即時串流）
 | query_type | 觸發範例 | Agent 組合 | Supervisor |
 |-----------|---------|-----------|-----------|
 | `stock_analysis` | 「2330 技術面」「台積電外資動向」 | technical + chip + news | ✗ |
-| `investment_strategy` | 「台積電值得買嗎」「2330 完整分析」 | 全部 7 個 | ✓ + Debate |
+| `stock_investment` | 「台積電值得買嗎」「2330 完整分析」 | 6 個（**不含 risk**） | ✓ + Debate |
+| `investment_strategy` | 「我的組合該怎麼調整」「整體部位配置」 | 全部 7 個（含 risk） | ✓ + Debate |
 | `fundamental_review` | 「台積電財報」「2330 ROE」 | fundamental + chip | ✗ |
 | `macro_outlook` | 「總經環境」「聯準會降息影響」 | macro + cross_market | ✗ |
 | `portfolio_risk` | 「我的 delta 曝險」「組合風控」 | risk | ✗ |
+
+> **個股 vs 組合為什麼要分開**：risk agent 讀 `config/positions.yaml` 分析的是
+> **整個投資組合**的 Greeks 曝險。若問「台積電值得買嗎」時納入 risk，組合中
+> 不相干部位一旦觸發硬約束，會透過 Supervisor Layer 1 強制降級整個個股建議
+> （confidence 壓到 0.35）。故個股建議走 `stock_investment`（無 risk），
+> 組合策略才走 `investment_strategy`（含 risk，該情境下強制降級是正確行為）。
+>
+> ⚠️ `stock_investment` 模式**不評估組合風控** —— 若你持有已 breach 的部位，
+> 問個股時不會收到警告，需另外查詢組合策略或 `portfolio_risk`。
 
 ---
 

@@ -24,7 +24,7 @@ Design rules (CLAUDE.md)
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, get_args, get_type_hints
 from unittest.mock import patch
 
 import pytest
@@ -48,7 +48,12 @@ from agents.chip_agent import (
     _llm_synthesize_chip,
     run_chip_agent,
 )
-from router.intent_router import _regex_fallback, route
+from router.intent_router import (
+    _QUERY_TYPE_AGENTS,
+    _SUPERVISOR_QUERY_TYPES,
+    _regex_fallback,
+    route,
+)
 from schemas.agent_signal import AgentType, HardConstraint, Signal, TimeHorizon
 from schemas.domain_report import (
     DomainReport,
@@ -1165,6 +1170,79 @@ class TestChipFallbackNarrative:
         out = _fallback_narrative(Signal.BEARISH, {"institutional_score": -0.4}, "some error")
         assert isinstance(out, str)
         assert out != ""
+
+
+# ─── 個股 / 組合語意切分（phase_16-E）─────────────────────────────────────────
+
+
+class TestStockInvestmentSplit:
+    """
+    修復前：問「台積電值得買嗎」會路由到 investment_strategy，該類型含 risk agent，
+    而 risk 讀 config/positions.yaml 分析的是「整個組合」的 Greeks。
+    組合中不相干部位一旦 breach，會透過 Supervisor Layer 1 強制降級整個個股建議。
+
+    修復後：個股走 stock_investment（無 risk），組合走 investment_strategy（含 risk）。
+    """
+
+    def test_stock_investment_excludes_risk_agent(self) -> None:
+        agents = _QUERY_TYPE_AGENTS["stock_investment"]
+        assert "risk" not in agents, (
+            f"個股投資建議不應含 risk agent（組合層曝險與所查個股無關）；got {agents}"
+        )
+
+    def test_investment_strategy_keeps_risk_agent(self) -> None:
+        """組合層策略仍須含 risk —— 此情境下強制降級是正確行為。"""
+        assert "risk" in _QUERY_TYPE_AGENTS["investment_strategy"]
+
+    def test_stock_investment_covers_all_non_risk_domains(self) -> None:
+        """排除 risk 之外，其餘六個 domain agent 都要在。"""
+        agents = set(_QUERY_TYPE_AGENTS["stock_investment"])
+        assert agents == {
+            "technical", "chip", "news", "fundamental", "macro", "cross_market",
+        }
+
+    def test_both_investment_types_run_supervisor_and_debate(self) -> None:
+        """兩種投資建議類型都要經過 Supervisor 仲裁與 Debate。"""
+        assert "stock_investment" in _SUPERVISOR_QUERY_TYPES
+        assert "investment_strategy" in _SUPERVISOR_QUERY_TYPES
+
+    def test_non_investment_types_skip_supervisor(self) -> None:
+        for qt in ("stock_analysis", "fundamental_review", "macro_outlook", "portfolio_risk"):
+            assert qt not in _SUPERVISOR_QUERY_TYPES, f"{qt} 不應觸發 Supervisor"
+
+    def test_every_query_type_has_agent_mapping(self) -> None:
+        """
+        RouterOutput 的 Literal 與 _QUERY_TYPE_AGENTS 必須完全對齊。
+
+        用 get_type_hints() 而非 __dataclass_fields__[].type：後者在
+        `from __future__ import annotations` 下回傳的是**字串**，
+        get_args() 對字串回傳空 tuple，斷言會假性通過（實測踩到）。
+        """
+        literal_types = set(get_args(get_type_hints(RouterOutput)["query_type"]))
+        assert literal_types == set(_QUERY_TYPE_AGENTS), (
+            f"schema Literal 與 _QUERY_TYPE_AGENTS 不一致：\n"
+            f"  只在 Literal：{literal_types - set(_QUERY_TYPE_AGENTS)}\n"
+            f"  只在 mapping：{set(_QUERY_TYPE_AGENTS) - literal_types}"
+        )
+
+
+class TestRegexFallbackInvestmentRouting:
+    """keyword fallback 的個股投資建議路由（LLM 不可用時的降級路徑）。"""
+
+    def test_strategy_keyword_routes_to_stock_investment(self) -> None:
+        out = _regex_fallback("2330 現在值得買嗎")
+        assert out.query_type == "stock_investment"
+        assert "risk" not in out.agents
+
+    def test_strategy_query_runs_supervisor_and_debate(self) -> None:
+        out = _regex_fallback("台積電適合買嗎")
+        assert out.run_supervisor is True
+        assert out.run_debate is True
+
+    def test_portfolio_keyword_still_wins_over_strategy(self) -> None:
+        """組合關鍵字在 if-chain 更前面，不應被 strategy 分支搶走。"""
+        out = _regex_fallback("我的選擇權組合現在適合加碼嗎")
+        assert out.query_type == "portfolio_risk"
 
 
 # ─── router/intent_router.py ─────────────────────────────────────────────────

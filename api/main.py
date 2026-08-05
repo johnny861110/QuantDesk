@@ -294,7 +294,10 @@ async def _stream_preset(
     直接用 query_type preset 跑分析，略過 Router LLM。
     適合前端已知查詢類型時使用（快速、省 LLM token）。
     """
-    from router.intent_router import _QUERY_TYPE_AGENTS  # noqa: PLC0415
+    from router.intent_router import (  # noqa: PLC0415
+        _QUERY_TYPE_AGENTS,
+        _SUPERVISOR_QUERY_TYPES,
+    )
     from schemas.domain_report import RouterOutput  # noqa: PLC0415
 
     agents = _QUERY_TYPE_AGENTS.get(query_type, _QUERY_TYPE_AGENTS["stock_analysis"])
@@ -306,8 +309,8 @@ async def _stream_preset(
         original_query=f"{symbol} {query_type}",
         query_type=query_type,  # type: ignore[arg-type]
         agents=agents,
-        run_supervisor=query_type == "investment_strategy",
-        run_debate=query_type == "investment_strategy",
+        run_supervisor=query_type in _SUPERVISOR_QUERY_TYPES,
+        run_debate=query_type in _SUPERVISOR_QUERY_TYPES,
     )
 
     # Emit synthetic router event so frontend knows what was routed

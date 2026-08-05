@@ -46,7 +46,7 @@ from schemas.domain_report import RouterOutput
 
 _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使用者的金融分析需求並分類。
 
-## 五種查詢類型與對應 agents
+## 六種查詢類型與對應 agents
 
 1. **stock_analysis**（個股技術/籌碼/新聞分析）
    觸發：問技術面、K線、均線、籌碼、外資、新聞
@@ -54,25 +54,37 @@ _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使
    agents: ["technical", "chip", "news"]
    run_supervisor: false, run_debate: false
 
-2. **investment_strategy**（投資建議 / 值不值得買）
-   觸發：問「適不適合買」「現在是買點嗎」「給我完整分析」「投資建議」
-   例：「台積電現在值得買嗎」「2330 完整分析」「幫我評估鴻海」
+2. **stock_investment**（**個股**投資建議 / 這檔值不值得買）
+   觸發：針對「某一檔股票」問適不適合買、是不是買點、要不要進場、完整評估
+   例：「台積電現在值得買嗎」「2330 完整分析」「幫我評估鴻海」「聯發科可以進場嗎」
+   agents: ["technical", "chip", "news", "fundamental", "macro", "cross_market"]
+   run_supervisor: true, run_debate: true
+   ⚠️ 注意：**不含 risk**。risk agent 分析的是使用者「整個投資組合」的
+      Greeks 曝險，與所查個股無關；納入會讓不相干部位的風控警訊
+      錯誤地降級這檔股票的建議。
+
+3. **investment_strategy**（**組合層**策略調整）
+   觸發：針對「使用者手上的整個組合／部位」問該怎麼調整、如何配置、要不要換股
+   例：「我的組合該怎麼調整」「現在該加碼還是減碼」「幫我看整體部位配置」
+        「我的持股組合有什麼風險」
    agents: ["technical", "chip", "news", "fundamental", "macro", "cross_market", "risk"]
    run_supervisor: true, run_debate: true
+   ⚠️ 與 stock_investment 的差別在於**問的是組合、不是單一標的**。
+      只要問句聚焦在某一檔股票，一律選 stock_investment。
 
-3. **fundamental_review**（財報/基本面分析）
+4. **fundamental_review**（財報/基本面分析）
    觸發：問財報、EPS、ROE、毛利率、盈餘品質
    例：「台積電的財報怎麼樣」「2330 這季 EPS 多少」「鴻海的毛利率趨勢」
    agents: ["fundamental", "chip"]
    run_supervisor: false, run_debate: false
 
-4. **macro_outlook**（總經/市場環境）
+5. **macro_outlook**（總經/市場環境）
    觸發：問利率、通膨、GDP、聯準會、美股、總體經濟、市場背景
    例：「現在總經環境怎樣」「聯準會降息對台股影響」「美股最近走勢」
    agents: ["macro", "cross_market"]
    run_supervisor: false, run_debate: false
 
-5. **portfolio_risk**（組合風控/Greeks）
+6. **portfolio_risk**（組合風控/Greeks）
    觸發：提到選擇權部位、期貨口數、delta/gamma/vega、對沖
    例：「我有 10 口 TXO Call 850 九月到期」「我的 delta 曝險」「組合怎麼對沖」
    agents: ["risk"]
@@ -99,6 +111,8 @@ _ROUTER_SYSTEM_PROMPT = """你是 QuantDesk 的智能路由員，負責理解使
 - market：TW / US / MIXED
 - depth：quick / standard / deep（不確定用 standard）
 - 不確定 query_type 時預設 stock_analysis
+- 個股 vs 組合是最容易搞混的一組：問句主詞是「某一檔股票」→ stock_investment；
+  是「我的組合／我的部位／整體配置」→ investment_strategy
 - portfolio_risk 場景：extra_context.positions 填使用者描述的部位
 - 只輸出 JSON，不要有其他文字
 """
@@ -149,11 +163,24 @@ _SCAN_KEYWORDS = re.compile(
 
 _QUERY_TYPE_AGENTS: dict[str, list[str]] = {
     "stock_analysis":     ["technical", "chip", "news"],
+    # 個股投資建議：**刻意不含 risk**。risk agent 讀 config/positions.yaml
+    # 分析的是「整個投資組合」的 Greeks，與所查個股無關。若納入，
+    # 組合中不相干部位的 breach 會透過 Supervisor Layer 1 強制降級
+    # 整個個股建議（confidence 壓到 _RISK_OVERRIDE_CONFIDENCE=0.35）。
+    "stock_investment":   ["technical", "chip", "news", "fundamental", "macro", "cross_market"],
+    # 組合層策略：含 risk，組合 breach 強制降級在此情境下是正確行為。
     "investment_strategy": ["technical", "chip", "news", "fundamental", "macro", "cross_market", "risk"],
     "fundamental_review": ["fundamental", "chip"],
     "macro_outlook":      ["macro", "cross_market"],
     "portfolio_risk":     ["risk"],
 }
+
+# 需要 Supervisor 仲裁 + Debate 的查詢類型。
+# 用集合成員判斷取代舊有的 `query_type == "investment_strategy"` 硬編碼比較，
+# 避免新增類型時漏改（原本散落 6 處）。
+_SUPERVISOR_QUERY_TYPES: frozenset[str] = frozenset({
+    "stock_investment", "investment_strategy",
+})
 
 _FUNDAMENTAL_KEYWORDS = re.compile(
     r"(財報|EPS|ROE|毛利|盈餘|本益比|配息|股利|資產負債|現金流)",
@@ -194,7 +221,10 @@ def _regex_fallback(query: str) -> RouterOutput:
         targets = [tickers[0]] if tickers else []
     elif _STRATEGY_KEYWORDS.search(query):
         scenario = "single_stock"
-        query_type = "investment_strategy"
+        # keyword fallback 走到這裡必為個股情境——組合類查詢已被前面的
+        # _PORTFOLIO_KEYWORDS 分支攔截。組合層 investment_strategy 只由
+        # LLM router 產生（regex 無法可靠區分個股 vs 組合策略）。
+        query_type = "stock_investment"
         targets = [tickers[0]] if tickers else []
     elif tickers:
         scenario = "single_stock"
@@ -214,8 +244,8 @@ def _regex_fallback(query: str) -> RouterOutput:
         original_query=query,
         query_type=query_type,  # type: ignore[arg-type]
         agents=agents,
-        run_supervisor=query_type == "investment_strategy",
-        run_debate=query_type == "investment_strategy",
+        run_supervisor=query_type in _SUPERVISOR_QUERY_TYPES,
+        run_debate=query_type in _SUPERVISOR_QUERY_TYPES,
     )
 
 
@@ -253,8 +283,8 @@ def route(query: str) -> RouterOutput:
             extra_context=raw.get("extra_context", {}),
             query_type=query_type,  # type: ignore[arg-type]
             agents=agents,
-            run_supervisor=bool(raw.get("run_supervisor", query_type == "investment_strategy")),
-            run_debate=bool(raw.get("run_debate", query_type == "investment_strategy")),
+            run_supervisor=bool(raw.get("run_supervisor", query_type in _SUPERVISOR_QUERY_TYPES)),
+            run_debate=bool(raw.get("run_debate", query_type in _SUPERVISOR_QUERY_TYPES)),
         )
         update_current_span(output={
             "scenario": output.scenario,
