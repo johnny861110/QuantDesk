@@ -44,6 +44,8 @@ from agents.chip_agent import (
     _compute_margin_pressure,
     _compute_shareholding_signal,
     _determine_chip_signal,
+    _fallback_narrative,
+    _llm_synthesize_chip,
     run_chip_agent,
 )
 from router.intent_router import _regex_fallback, route
@@ -1064,6 +1066,105 @@ class TestRunChipAgent:
                 report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
         assert isinstance(report, DomainReport)
         assert report.narrative_summary == "[fallback narrative]"
+
+
+# ─── chip_agent Verifier 接線（phase_16-B）────────────────────────────────────
+
+
+class TestChipAgentVerifier:
+    """
+    chip_agent 曾是六個 domain agent 中唯一未接 agents/verifier.py 的，
+    僅靠 prompt 文字約束 LLM 不要複讀數字——違反 CLAUDE.md 設計原則①。
+    phase_16-B 接上 check_narrative，處置方式與其餘 5 個 agent 一致：
+    記錄錯誤進 report.errors，但保留 narrative（不丟棄證據）。
+    """
+
+    def _adapter_with_data(self) -> _MockChipAdapter:
+        inst = _inst_rows([
+            ("2026-07-21", 3000.0, 100.0, 0.0),
+            ("2026-07-22", 2000.0, 100.0, 0.0),
+        ])
+        return _MockChipAdapter({
+            "TaiwanStockInstitutionalInvestorsBuySell": inst,
+            "TaiwanStockMarginPurchaseShortSale": [],
+            "TaiwanStockShareholding": [],
+            "TaiwanFuturesInstitutionalInvestors": [],
+        })
+
+    def test_hallucinated_number_is_recorded_as_error(self) -> None:
+        """LLM 吐出不存在於 key_findings 的數字 → 必須被 Verifier 攔下記錄。"""
+        adapter = self._adapter_with_data()
+        with patch(
+            "agents.chip_agent._llm_synthesize_chip",
+            return_value="外資連續買超，融資餘額達 987654 張，籌碼明顯轉強。",
+        ):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert any("未經工具驗證的數字" in e for e in report.errors), (
+            f"Verifier 未攔下幻覺數字 987654；report.errors={report.errors}"
+        )
+
+    def test_hallucinated_narrative_is_preserved_not_discarded(self) -> None:
+        """處置方式是「記錄」而非「丟棄」——narrative 必須原樣保留供稽核。"""
+        bad = "外資連續買超，融資餘額達 987654 張，籌碼明顯轉強。"
+        adapter = self._adapter_with_data()
+        with patch("agents.chip_agent._llm_synthesize_chip", return_value=bad):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert report.narrative_summary == bad
+
+    def test_clean_qualitative_narrative_passes(self) -> None:
+        """純質化敘述（無任何數字）不應產生 Verifier 錯誤。"""
+        adapter = self._adapter_with_data()
+        with patch(
+            "agents.chip_agent._llm_synthesize_chip",
+            return_value="外資買盤延續，籌碼面偏向收斂，短線動能仍在。",
+        ):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert not any("未經工具驗證的數字" in e for e in report.errors), (
+            f"乾淨敘述被誤判；report.errors={report.errors}"
+        )
+
+    def test_number_present_in_key_findings_is_allowed(self) -> None:
+        """引用 key_findings 內真實算出的數值 → 允許，不算幻覺。"""
+        adapter = self._adapter_with_data()
+        # 先跑一次取得真實 key_findings，再用其中的值組 narrative
+        with patch("agents.chip_agent._llm_synthesize_chip", return_value=""):
+            base = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+        consecutive = base.key_findings.get("consecutive_days")
+        assert consecutive is not None, "測試前提不成立：key_findings 缺 consecutive_days"
+
+        with patch(
+            "agents.chip_agent._llm_synthesize_chip",
+            return_value=f"外資連續買超 {consecutive:.0f} 日，籌碼轉強。",
+        ):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert not any("未經工具驗證的數字" in e for e in report.errors), (
+            f"引用真實 metrics 被誤判；report.errors={report.errors}"
+        )
+
+
+class TestChipFallbackNarrative:
+    """_fallback_narrative / _llm_synthesize_chip 的 LLM 失敗路徑（原為 0 覆蓋）。"""
+
+    def test_llm_exception_returns_fallback_text(self) -> None:
+        """OpenAI 呼叫拋例外 → 回傳確定性 fallback，不得往上拋。"""
+        with patch("agents.chip_agent.OpenAI", side_effect=RuntimeError("boom"), create=True):
+            out = _llm_synthesize_chip(
+                symbol="2330",
+                signal=Signal.BULLISH,
+                confidence=0.7,
+                key_findings={"institutional_score": 0.5},
+            )
+        assert isinstance(out, str)
+        assert out != ""
+
+    def test_fallback_narrative_is_deterministic_string(self) -> None:
+        out = _fallback_narrative(Signal.BEARISH, {"institutional_score": -0.4}, "some error")
+        assert isinstance(out, str)
+        assert out != ""
 
 
 # ─── router/intent_router.py ─────────────────────────────────────────────────
