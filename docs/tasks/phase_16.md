@@ -1,5 +1,55 @@
 # Phase 16-18 — 全盤重評估與修改計畫
 
+> ## ✅ Phase 16 執行完成（2026-08-05，branch `phase-16-hardening`）
+>
+> | 項目 | commit | 結果 |
+> |---|---|---|
+> | 16-A 文件真實性對帳 | `de7e080` | D1-D12 + Q1/Q3 決策文件化 |
+> | 16-C 測試環境隔離 | `141602a` | Langfuse 逾時訊息消失 |
+> | 16-B chip Verifier + **16-F** | `b47c646` | 888 → 894 tests |
+> | 16-D SDK 統一 + Langfuse cost | `0fc545b` | langchain 完全脫離、8/8 drop-in |
+> | 16-E query_type 切分 | `ff9885a` | 894 → 903 tests |
+>
+> **最終驗收**：ruff ✅ / mypy ✅ / pytest **903 passed, 1 skipped**（基準 888）
+>
+> ### 🔴 16-F —— 計畫外的 P0 發現（本次最有價值的產出）
+>
+> 寫 16-B 測試時意外揭露：**`agents/verifier.py` 對 4 位數以上、無千分位逗號的
+> 數字完全偵測不到**（`1234` / `987654` / `-80773006` 全部漏掉），
+> 而這正是 LLM 在財經語境最常幻覺的數字型態。
+>
+> 根因：`_NUM_RE` 整數部分為 `\d{1,3}(?:,\d{3})*`，搭配前後
+> `(?<!\d)`/`(?!\d)` 邊界後長數字一個都匹配不到。原本「排除 19xx/20xx 年份」
+> 的 lookahead 因此是死碼——反證原作者以為 4 位數會被攔下。
+>
+> 影響：**全部 6 個接 Verifier 的 agent**。這是設計原則①
+> 「LLM 永遠不產出數字」唯一的程式化防線。
+>
+> 修復：regex 改為「千分位格式 | 任意連續數字」；新增 `symbol_allowlist()`
+> 處理台股 4 碼代號的誤判（修好 regex 後「台積電 2330」會被當成幻覺數字）；
+> `check_narrative()` 新增 `allow` 參數（預設 None，向後相容）。
+>
+> **這件事的意義**：一個存在已久、三關驗收全綠、888 個測試都測不出來的
+> 核心防線缺陷，是「補一個 0 覆蓋函式的測試」時才浮出來的。
+> 這正是 Phase 17 評估框架的價值預演——**沒有測試就沒有發現**。
+>
+> ### 執行過程的其他修正（與原計畫不同之處）
+>
+> 1. **16-B 處置方式修正**：原計畫寫「驗證失敗 → fallback 模板」，
+>    實查其餘 5 個 agent 全部是「記錄錯誤進 errors、保留 narrative」
+>    （technical:616 / macro:744 / news:665 / cross_market:528 / risk:693）。
+>    改為比照 5:0 的既有慣例，保留違規證據供 Supervisor 調整 data_quality。
+> 2. **16-C 需要兩道閘門**：換上 `langfuse.openai` drop-in 後逾時訊息復發。
+>    原因是 drop-in 是 SDK 內建 instrumentation，**完全不看**專案自訂的
+>    `LANGFUSE_ENABLED`，必須另外設 SDK 官方的 `LANGFUSE_TRACING_ENABLED`。
+> 3. **D10 未處理**：`AGENTS.md` / `CLAUDE.md` 的 GitNexus 區塊重複，
+>    但兩處皆由 `<!-- gitnexus:start/end -->` 標記由工具自動注入管理，
+>    手動去重會被下次 `gitnexus analyze` 還原，故不處理。
+> 4. **`supervisor/graph.py` 改名取消**：實測 blast radius 14 個 import 點，
+>    純美觀改名成本效益不划算，改為只修文件說明。
+>
+> ---
+
 > 制定日期：2026-08-05（取代 2026-08-04 初版）
 > 依據：三關驗收 + GitNexus 圖譜 + **全部 14 份專案 markdown 逐份閱讀** + 逐檔案讀碼
 > 前置狀態：ruff/mypy 全綠、888 passed / 1 skipped、85% 覆蓋率、0 import 循環依賴

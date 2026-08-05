@@ -88,7 +88,7 @@ cd dashboard && npm run dev
 ```bash
 uv run ruff check .          # lint — 零 error 零 warning
 uv run mypy .                # 型別 — zero issues
-uv run pytest -q             # 888 passed / 1 skipped
+uv run pytest -q             # 903 passed / 1 skipped
 cd dashboard && npm run build # frontend build
 ```
 
@@ -228,7 +228,7 @@ quantdesk-starter/
 ├── router/
 │   └── intent_router.py     # LLM + regex fallback 意圖分類
 ├── config/positions.yaml    # 持倉設定（前端可互動修改）
-├── tests/                   # 888 tests（pytest + pytest-cov，覆蓋率 85%）
+├── tests/                   # 903 tests（pytest + pytest-cov）
 ├── dashboard/src/
 │   ├── App.tsx              # 主頁（sidebar 佈局）
 │   ├── types.ts
@@ -275,7 +275,7 @@ Greeks、財務指標、技術指標、統計量一律由純 Python 計算。LLM
 | 13 | Frontend Pro（recharts + constraints + 歷史 + 匯出）| ✅ |
 | 14 | Engineering Quality（E2E + CI frontend + coverage）| ✅ |
 | 15 | Query-Type Routing + Async 重構 + 新聞修復 + UI 重大改版 | ✅ |
-| 16 | Truth & Correctness（文件對帳 + chip Verifier + SDK 統一 + query_type 切分）| 🚧 |
+| 16 | Truth & Correctness（文件對帳 + chip Verifier + verifier 修復 + SDK 統一 + query_type 切分）| ✅ |
 | 17 | Evaluation Framework（prompt 快照 + golden set + faithfulness）| 📋 |
 
 > Phase 16/17 計畫見 `docs/tasks/phase_16.md`

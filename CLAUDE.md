@@ -104,12 +104,12 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
 - [x] Phase 13：Frontend Pro（recharts 圖表、hard constraints 明細、查詢歷史、JSON 匯出、重試、時間戳）
 - [x] Phase 14：Engineering Quality（E2E SSE 測試、CI frontend build、pytest-cov 覆蓋率）
 - [x] Phase 15：Query-Type Routing + Async 重構 + 新聞修復 + AgentSidebar / PositionsPanel
-- [ ] Phase 16：Truth & Correctness（文件真實性對帳 + chip Verifier + 測試隔離 +
+- [x] Phase 16：Truth & Correctness（文件真實性對帳 + chip Verifier + 測試隔離 +
       SDK 統一/Langfuse cost + query_type 個股/組合切分）— 計畫見 `docs/tasks/phase_16.md`
 - [ ] Phase 17：Evaluation Framework（prompt 快照 / router golden set /
       supervisor 資料驅動情境 / narrative faithfulness）— 兌現 `docs/spec.md §8.2`
 
-> 測試基準：**888 passed / 1 skipped**、覆蓋率 85%（2026-08-05 實測）。
+> 測試基準：**903 passed / 1 skipped**（2026-08-05 Phase 16 完成後實測）。
 > 修改此數字前請先實跑 `uv run pytest -q --cov`，不要沿用舊值。
 
 <!-- gitnexus:start -->

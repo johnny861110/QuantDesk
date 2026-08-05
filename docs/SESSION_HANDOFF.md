@@ -1,7 +1,13 @@
 # QuantDesk — Session Handoff Document
 > 給下一個 Claude Code session 的完整專案交接文件
-> 最後更新：2026-07-25
-> Git HEAD：`main` branch，所有工作已 push
+> 最後更新：2026-08-05（Phase 16 完成）
+> Git HEAD：branch `phase-16-hardening`，尚未 push / 尚未開 PR
+>
+> ⚠️ 本文件 §二～§六 描述的是 **2026-07-25 Phase 15 當下**的狀態，未逐段重寫。
+> 已知過期處：§三 測試數 867（現為 **903**）、§五 tests/ 867、
+> §一 與 §四 未涵蓋 Phase 16 新增的 `stock_investment` query_type。
+> **最新狀態以 `README.md` / `CLAUDE.md` / `docs/tasks/phase_16.md` 為準。**
+> §七 已知問題清單已於 2026-08-05 全面對帳，是本文件最新的一節。
 
 ---
 
@@ -199,11 +205,11 @@ quantdesk-starter/
 ## 七、已知問題與 Tech Debt
 
 > **狀態對帳日期：2026-08-05**（Phase 16-A 全面複驗）
-> ⬜ 未解 ／ 🚧 已排入 Phase 16 ／ ✅ 已解
+> ⬜ 未解 ／ ✅ 已解（Phase 16 已全數執行完畢）
 
 ### P0（影響結果正確性）
-1. 🚧 **Risk agent 是組合層級，非個股**：`positions.yaml` 分析的是整個投資組合，不是查詢的個股。`stock_analysis` 模式現在已排除 risk agent，但 `investment_strategy` 仍會跑 risk 並可能因組合 breach 強制降級整個策略建議。
-   → **Phase 16-E 修復中**：新增 `stock_investment` query_type 做個股/組合語意切分。
+1. ✅ **Risk agent 是組合層級，非個股**：`positions.yaml` 分析的是整個投資組合，不是查詢的個股。`stock_analysis` 模式現在已排除 risk agent，但 `investment_strategy` 仍會跑 risk 並可能因組合 breach 強制降級整個策略建議。
+   → **Phase 16-E 已修復**：新增 `stock_investment` query_type 做個股/組合語意切分。
 2. ⬜ **FinMind IV 反推成功率未知**：`iv_source: "placeholder_0.20: 3/3"` 表示沒有取到真實 IV，需要確認 `FINMIND_TOKEN` 是否正確設定且帳號有 TXO 選擇權資料權限。
    → 需**人工確認 FinMind 帳號權限**，非程式問題，Phase 16 不處理。
 
@@ -219,16 +225,21 @@ quantdesk-starter/
 9. ⬜ **PositionsPanel 未做欄位驗證**：例如 option 沒填 strike 可能導致 risk agent 失敗。
 
 ### P0'（2026-08-05 新發現，原清單未涵蓋）
-10. 🚧 **chip_agent 是唯一未接 Verifier 的 agent**：`_llm_synthesize_chip()` 僅靠 prompt 文字約束 LLM 不複讀數字，無程式化檢查。**違反設計原則①**。
-    → **Phase 16-B 修復中**。
-11. 🚧 **測試依賴本機 `.env`**：`.env` 的 `LANGFUSE_ENABLED=true` 讓 `pytest` 對 Langfuse 發真實網路請求並逾時。同一顆測試在不同機器行為不同。
-    → **Phase 16-C 修復中**。
-12. 🚧 **Langfuse 完全沒有 token / cost 追蹤**：8 個 LLM 呼叫點皆未帶 `usage_details`，dashboard 上成本為空。
-    → **Phase 16-D 修復中**（改用 `langfuse.openai` drop-in）。
-13. 🚧 **LangChain 孤例 + 隱性跨 repo 依賴**：`fundamental_agent.py:555` 是全專案唯一用 `langchain_openai` 的地方，且 langchain 未在本專案 `pyproject.toml` 宣告，靠 `financial-agent` 順帶帶入。
-    → **Phase 16-D 修復中**。
-14. ⬜ **改任何 prompt，888 個測試全部照過**：無任何測試斷言 prompt 內容，LLM 一律 mock。
+10. ✅ **chip_agent 是唯一未接 Verifier 的 agent**：`_llm_synthesize_chip()` 僅靠 prompt 文字約束 LLM 不複讀數字，無程式化檢查。**違反設計原則①**。
+    → **Phase 16-B 已修復**（處置比照其餘 5 agent：記錄錯誤、保留 narrative）。
+11. ✅ **測試依賴本機 `.env`**：`.env` 的 `LANGFUSE_ENABLED=true` 讓 `pytest` 對 Langfuse 發真實網路請求並逾時。同一顆測試在不同機器行為不同。
+    → **Phase 16-C 已修復**。注意需**兩道**閘門：`LANGFUSE_ENABLED`（專案自訂）
+      + `LANGFUSE_TRACING_ENABLED`（SDK 官方，drop-in 只看這道）。
+12. ✅ **Langfuse 完全沒有 token / cost 追蹤**：8 個 LLM 呼叫點皆未帶 `usage_details`，dashboard 上成本為空。
+    → **Phase 16-D 已修復**（8/8 改用 `langfuse.openai` drop-in）。待人工看 dashboard 確認。
+13. ✅ **LangChain 孤例 + 隱性跨 repo 依賴**：`fundamental_agent.py:555` 是全專案唯一用 `langchain_openai` 的地方，且 langchain 未在本專案 `pyproject.toml` 宣告，靠 `financial-agent` 順帶帶入。
+    → **Phase 16-D 已修復**，agents/ router/ supervisor/ api/ schemas/ 已無 langchain。
+14. ⬜ **改任何 prompt，903 個測試全部照過**：無任何測試斷言 prompt 內容，LLM 一律 mock。
     → **Phase 17 Evaluation Framework 處理**。
+15. ✅ **agents/verifier.py 對 4 位數以上數字全盲**（Phase 16-F 新發現）：
+    `_NUM_RE` 只匹配 ≤3 位數或帶逗號格式，`1234` / `987654` / `-80773006`
+    完全偵測不到——正是 LLM 在財經語境最常幻覺的型態。影響全部 6 個 agent。
+    → **Phase 16-F 已修復**（regex + `symbol_allowlist()` 處理台股 4 碼誤判）。
 
 ---
 
