@@ -88,7 +88,7 @@ cd dashboard && npm run dev
 ```bash
 uv run ruff check .          # lint — 零 error 零 warning
 uv run mypy .                # 型別 — zero issues
-uv run pytest -q             # 903 passed / 1 skipped
+uv run pytest -q             # 919 passed / 1 skipped
 cd dashboard && npm run build # frontend build
 ```
 
@@ -215,6 +215,7 @@ quantdesk-starter/
 │   ├── fx_adapter.py
 │   ├── macro_adapter.py
 │   ├── news_adapter.py      # Google News RSS + Tavily + MOPS
+│   ├── ticker_registry.py   # 離線代碼→名稱查表（無執行期網路）
 │   ├── options_adapter.py   # FinMind IV 反推
 │   └── price_adapter.py
 ├── schemas/
@@ -228,7 +229,9 @@ quantdesk-starter/
 ├── router/
 │   └── intent_router.py     # LLM + regex fallback 意圖分類
 ├── config/positions.yaml    # 持倉設定（前端可互動修改）
-├── tests/                   # 903 tests（pytest + pytest-cov）
+├── data/tickers.jsonl       # 台股+美股 ticker 註冊表（13,531 筆，進版控）
+├── scripts/refresh_ticker_registry.py  # 重新產生上表
+├── tests/                   # 919 tests（pytest + pytest-cov）
 ├── dashboard/src/
 │   ├── App.tsx              # 主頁（sidebar 佈局）
 │   ├── types.ts

@@ -109,7 +109,7 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
 - [ ] Phase 17：Evaluation Framework（prompt 快照 / router golden set /
       supervisor 資料驅動情境 / narrative faithfulness）— 兌現 `docs/spec.md §8.2`
 
-> 測試基準：**903 passed / 1 skipped**（2026-08-05 Phase 16 完成後實測）。
+> 測試基準：**919 passed / 1 skipped**（2026-08-08 實測）。
 > 修改此數字前請先實跑 `uv run pytest -q --cov`，不要沿用舊值。
 
 <!-- gitnexus:start -->

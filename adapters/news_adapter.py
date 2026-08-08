@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from adapters.base import NewsAdapter, SourcedData
+from adapters.ticker_registry import lookup_name
 
 # ─── Confidence tier constants ────────────────────────────────────────────────
 
@@ -53,48 +54,24 @@ DEFAULT_RSS_FEEDS: dict[str, str] = {
 }
 RSS_MAX_ITEMS: int = 30   # per feed
 
-# ─── Taiwan stock name lookup ─────────────────────────────────────────────────
-# Maps stock code → Chinese name for building search queries.
-# Common blue-chips; falls back to stock code if not found.
-
-TW_STOCK_NAMES: dict[str, str] = {
-    "2330": "台積電",
-    "2317": "鴻海",
-    "2454": "聯發科",
-    "2882": "國泰金",
-    "2881": "富邦金",
-    "2886": "兆豐金",
-    "2891": "中信金",
-    "2884": "玉山金",
-    "2892": "第一金",
-    "2885": "元大金",
-    "0050": "元大台灣50",
-    "0056": "元大高股息",
-    "2412": "中華電",
-    "3711": "日月光投控",
-    "2308": "台達電",
-    "2303": "聯電",
-    "2357": "華碩",
-    "2382": "廣達",
-    "2379": "瑞昱",
-    "6505": "台塑化",
-    "1301": "台塑",
-    "1303": "南亞",
-    "2002": "中鋼",
-    "2207": "和泰車",
-    "2327": "國巨",
-    "3008": "大立光",
-    "4938": "和碩",
-    "2409": "友達",
-    "2395": "研華",
-    "6669": "緯穎",
-}
+# ─── Stock name lookup ────────────────────────────────────────────────────────
 
 
 def _stock_chinese_name(symbol: str) -> str:
-    """Return Chinese name for the symbol, or the numeric code as fallback."""
+    """
+    Return the company name for the symbol, or the code itself as fallback.
+
+    Backed by adapters/ticker_registry.py — a local offline JSONL registry
+    (13k+ TW + US tickers, no network at runtime).  This replaced a
+    hand-maintained 30-entry dict that covered only blue chips, leaving
+    ~99 % of TW stocks searchable by numeric code alone and measurably
+    degrading news relevance for everything outside those 30.
+
+    Unknown symbol → returns the code, i.e. the exact behaviour callers
+    already handled before the registry existed.
+    """
     code = _strip_tw_suffix(symbol)
-    return TW_STOCK_NAMES.get(code, code)
+    return lookup_name(code) or code
 
 
 def _build_stock_rss_feeds(symbol: str) -> dict[str, str]:

@@ -216,7 +216,8 @@ quantdesk-starter/
 ### P1（輸出品質）
 3. ⬜ **Fundamental narrative 偶爾空白**：`OPENAI_API_KEY` 正確但若網路超時仍會空白。
 4. ⬜ **Macro degraded 模式**：FRED 資料沒有 consensus，`computable_count=0`，信心只有 0.1，實際上有 15 個事件卻顯示降級。
-5. ⬜ **新聞面 Tavily 搜尋詞**：目前用 `["台積電", "2330", "TSMC"]`，非主要台股可能沒有中文名稱，只能搜股票代碼。
+5. ✅ **新聞面 Tavily 搜尋詞**：原本 `TW_STOCK_NAMES` 只有手寫 30 檔，其餘台股沒有中文名、只能搜股票代碼。
+   → **已修復**：改由 `adapters/ticker_registry.py` 離線查表（`data/tickers.jsonl`，台股 3,133 + 美股 10,398 = 13,531 筆），涵蓋率 30 → 13,531。
 
 ### P2（待優化）
 6. ⬜ **持倉 YAML 需每月手動更新到期日**：選擇權 expiry 到期後 position_loader 會報 T≤0 錯誤。應加入自動跳過已到期部位的邏輯。
