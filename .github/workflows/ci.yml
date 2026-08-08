@@ -2,8 +2,18 @@ name: CI
 on:
   push:
     branches: [main]
+  # 刻意不限制 base 分支。
+  #
+  # 原本是 `pull_request: branches: [main]`，該過濾器是依 **base 分支**判定，
+  # 導致任何 base 不是 main 的 PR 完全拿不到 CI —— stacked PR（把 Phase N+1
+  # 疊在尚未合併的 Phase N 之上）是本專案的常見做法，卻會裸奔通過 review。
+  #
+  # 實際踩到：PR #35 base 指向 phase-16-hardening 時顯示 "no checks reported"，
+  # 直到 #34 合併、base 自動 retarget 成 main 之後 CI 才第一次跑起來。
+  # 那段期間 review 者看到的是「沒有紅燈」，而非「驗證通過」——兩者意義完全不同。
+  #
+  # 成本：CI 只在有 PR 活動時觸發，不是每次 push；用量由 PR 數量自然限制。
   pull_request:
-    branches: [main]
 jobs:
   test:
     runs-on: ubuntu-latest

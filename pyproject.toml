@@ -40,7 +40,10 @@ pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
     "integration: hits real SQLiteStore / filesystem; run with: uv run pytest -m integration",
+    "llm_eval: calls a real LLM and costs money; excluded from the default run. Run with: uv run pytest -m llm_eval -s",
 ]
+# 預設排除 llm_eval —— CI 與日常開發不該打真實 LLM 也不該產生費用。
+addopts = "-m 'not llm_eval'"
 
 [tool.coverage.run]
 source = ["agents", "adapters", "supervisor", "schemas", "api"]

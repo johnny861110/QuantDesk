@@ -187,7 +187,13 @@ _FUNDAMENTAL_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 _MACRO_KEYWORDS = re.compile(
-    r"(總經|利率|通膨|CPI|GDP|聯準會|Fed|美股|降息|升息|殖利率|市場環境)",
+    # (?<!毛)利率 —— 「毛利率」是基本面指標，不是總經利率。
+    # 修復前 _MACRO_KEYWORDS 的「利率」會被「毛利率」子字串命中，
+    # 而 macro 分支在 _regex_fallback 的 if-chain 中排在 fundamental 之前，
+    # 導致「鴻海的毛利率趨勢」被誤路由成 macro_outlook（Phase 17 L2 golden set 揪出）。
+    # 用 lookbehind 而非調整 if-chain 順序：改動範圍最小，
+    # 且「殖利率」「利率」等真正的總經詞仍正常命中。
+    r"(總經|(?<!毛)利率|通膨|CPI|GDP|聯準會|Fed|美股|降息|升息|殖利率|市場環境)",
     re.IGNORECASE,
 )
 _STRATEGY_KEYWORDS = re.compile(

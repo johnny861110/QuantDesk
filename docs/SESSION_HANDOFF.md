@@ -232,7 +232,11 @@ quantdesk-starter/
     → **Phase 16-C 已修復**。注意需**兩道**閘門：`LANGFUSE_ENABLED`（專案自訂）
       + `LANGFUSE_TRACING_ENABLED`（SDK 官方，drop-in 只看這道）。
 12. ✅ **Langfuse 完全沒有 token / cost 追蹤**：8 個 LLM 呼叫點皆未帶 `usage_details`，dashboard 上成本為空。
-    → **Phase 16-D 已修復**（8/8 改用 `langfuse.openai` drop-in）。待人工看 dashboard 確認。
+    → **Phase 16-D 已修復**（8/8 改用 `langfuse.openai` drop-in）。
+      **2026-08-09 已實測驗證**：真實 gpt-4o-mini 呼叫後查 Langfuse public API，
+      generation 節點帶 `model=gpt-4o-mini-2024-07-18`、
+      `usage={input:288, output:96, total:384}`、`cost=$0.0001008`。
+      對照組：修復前的 `debate:*_llm_call` 歷史紀錄為 `model=None, usage=0, cost=None`。
 13. ✅ **LangChain 孤例 + 隱性跨 repo 依賴**：`fundamental_agent.py:555` 是全專案唯一用 `langchain_openai` 的地方，且 langchain 未在本專案 `pyproject.toml` 宣告，靠 `financial-agent` 順帶帶入。
     → **Phase 16-D 已修復**，agents/ router/ supervisor/ api/ schemas/ 已無 langchain。
 14. ⬜ **改任何 prompt，903 個測試全部照過**：無任何測試斷言 prompt 內容，LLM 一律 mock。
