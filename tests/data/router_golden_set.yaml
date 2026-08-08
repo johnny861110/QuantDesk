@@ -1,0 +1,154 @@
+# Router Golden Set —— Phase 17 L2
+#
+# 用途
+# ----
+# 「使用者這樣問 → 應該路由到哪個 query_type」的期望對照表。
+#
+# 兩種消費方式：
+#   1. tests/test_eval_router.py 的確定性迴歸 —— 跑 _regex_fallback，
+#      不需要 LLM，可直接進 CI。
+#   2. 同檔的 LLM 準確率評估 —— 需 OPENAI_API_KEY，
+#      標記為 llm_eval，預設 skip，手動跑來量測 Router LLM 的分類正確率。
+#
+# 欄位
+# ----
+#   query          必填。使用者實際會打的自然語言。
+#   expect         必填。理想的 query_type（LLM 應該給出的答案）。
+#   targets        選填。期望解析出的標的代號。
+#   fallback_gap   選填。當 regex fallback **給不出** expect 時，
+#                  填它實際回傳的值。這是刻意記錄的已知限制：
+#                  regex 沒有語意理解能力，本來就有做不到的情境。
+#                  若哪天 fallback 改進到能給出 expect，測試會提醒你移除此欄。
+#   note           選填。說明為什麼有 gap，或這個 case 在測什麼。
+
+# ── stock_analysis：個股技術/籌碼/新聞 ────────────────────────────────────────
+- query: "2330 技術面分析"
+  expect: stock_analysis
+  targets: ["2330"]
+- query: "台積電外資動向"
+  expect: stock_analysis
+- query: "聯發科最近有什麼消息"
+  expect: stock_analysis
+- query: "2454 的 K 線怎麼看"
+  expect: stock_analysis
+  targets: ["2454"]
+- query: "看一下 3034 的籌碼"
+  expect: stock_analysis
+  targets: ["3034"]
+- query: "2308 融資融券變化"
+  expect: stock_analysis
+  targets: ["2308"]
+- query: "台積電"
+  expect: stock_analysis
+  note: "只給名稱，無其他線索 → 預設個股分析"
+- query: "2330"
+  expect: stock_analysis
+  targets: ["2330"]
+
+# ── stock_investment：個股投資建議（不含 risk agent）────────────────────────
+- query: "台積電現在值得買嗎"
+  expect: stock_investment
+- query: "2330 完整分析"
+  expect: stock_investment
+  targets: ["2330"]
+- query: "幫我評估鴻海"
+  expect: stock_investment
+- query: "聯詠可以進場嗎"
+  expect: stock_investment
+- query: "現在是 2308 的買點嗎"
+  expect: stock_investment
+  targets: ["2308"]
+- query: "3034 適合買嗎"
+  expect: stock_investment
+  targets: ["3034"]
+- query: "想聽聽你對聯發科的看法"
+  expect: stock_investment
+- query: "2454 現在該賣點還是續抱"
+  expect: stock_investment
+  targets: ["2454"]
+
+# ── investment_strategy：組合層策略（含 risk agent）─────────────────────────
+- query: "我的組合該怎麼調整"
+  expect: investment_strategy
+  fallback_gap: portfolio_risk
+  note: "regex 的 _PORTFOLIO_KEYWORDS 含「組合」，在 if-chain 更前面攔截 →
+         降級成純風控查詢。語意上這是策略問題，需要 LLM 才分得出來。"
+- query: "整體部位配置給我建議"
+  expect: investment_strategy
+  fallback_gap: stock_analysis
+  note: "無任何關鍵字命中 → 落到預設值。regex 無語意理解能力。"
+- query: "我的持股組合有什麼風險"
+  expect: investment_strategy
+  fallback_gap: portfolio_risk
+  note: "同上，「組合」先被 portfolio 分支攔走。"
+- query: "現在該加碼還是減碼"
+  expect: investment_strategy
+  fallback_gap: stock_analysis
+  note: "加碼/減碼 不在 _STRATEGY_KEYWORDS 中。"
+
+# ── fundamental_review：財報/基本面 ─────────────────────────────────────────
+- query: "台積電的財報怎麼樣"
+  expect: fundamental_review
+- query: "2330 這季 EPS 多少"
+  expect: fundamental_review
+  targets: ["2330"]
+- query: "鴻海的毛利率趨勢"
+  expect: fundamental_review
+  note: "迴歸守護：修復前「毛利率」含子字串「利率」→ 被 _MACRO_KEYWORDS
+         誤判成 macro_outlook（Phase 17 L2 揪出，已用 (?<!毛) lookbehind 修復）。"
+- query: "看一下 2454 的 ROE"
+  expect: fundamental_review
+  targets: ["2454"]
+- query: "2308 的本益比合理嗎"
+  expect: fundamental_review
+  targets: ["2308"]
+- query: "台達電現金流健康嗎"
+  expect: fundamental_review
+
+# ── macro_outlook：總經/市場環境 ────────────────────────────────────────────
+- query: "現在總經環境怎樣"
+  expect: macro_outlook
+- query: "聯準會降息對台股影響"
+  expect: macro_outlook
+- query: "美股最近走勢"
+  expect: macro_outlook
+- query: "CPI 數據出來了嗎"
+  expect: macro_outlook
+- query: "殖利率倒掛代表什麼"
+  expect: macro_outlook
+  note: "與毛利率修復的對照組：殖利率必須仍被判為 macro。"
+- query: "央行升息對市場的影響"
+  expect: macro_outlook
+
+# ── portfolio_risk：純 Greeks 風控查詢 ──────────────────────────────────────
+- query: "我有 10 口 TXO Call 850 九月到期"
+  expect: portfolio_risk
+- query: "我的 delta 曝險多少"
+  expect: portfolio_risk
+- query: "組合怎麼對沖"
+  expect: portfolio_risk
+- query: "gamma 風險大嗎"
+  expect: portfolio_risk
+- query: "現在的 vega 部位需要調整嗎"
+  expect: portfolio_risk
+- query: "台指期避險部位夠嗎"
+  expect: portfolio_risk
+
+# ── 多標的掃描 ──────────────────────────────────────────────────────────────
+- query: "幫我掃金融股找機會"
+  expect: stock_analysis
+  note: "scenario 應為 multi_stock_scan；query_type 仍是 stock_analysis
+         （multi_stock_scan 尚未實作獨立 query_type，見 SESSION_HANDOFF §八）"
+- query: "半導體類股哪幾檔比較強"
+  expect: stock_analysis
+- query: "2330 跟 2454 哪個好"
+  expect: stock_analysis
+  targets: ["2330", "2454"]
+
+# ── 邊界情境 ────────────────────────────────────────────────────────────────
+- query: "隨便聊聊"
+  expect: stock_analysis
+  note: "無法分類 → 必須落到安全預設值，不得拋例外。"
+- query: ""
+  expect: stock_analysis
+  note: "空字串邊界。"
