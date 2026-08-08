@@ -44,6 +44,7 @@ from adapters.chip_adapter import (
     MarginResult,
     ShareholdingResult,
 )
+from agents.verifier import check_narrative, symbol_allowlist
 from observability.langfuse_setup import observe, update_current_span
 from schemas.agent_signal import AgentType, Signal, TimeHorizon
 from schemas.domain_report import DomainReport, ReasoningStep
@@ -303,7 +304,7 @@ def _determine_chip_signal(
 # ─── LLM 摘要層 ──────────────────────────────────────────────────────────────
 
 
-@observe(name="chip_agent:llm_synthesize", as_type="generation")  # type: ignore[misc]
+@observe(name="chip_agent:llm_synthesize")  # type: ignore[misc]
 def _llm_synthesize_chip(
     symbol: str,
     signal: Signal,
@@ -325,7 +326,7 @@ def _llm_synthesize_chip(
     失敗時 fallback 至確定性模板（不影響 signal 輸出）。
     """
     try:
-        from openai import OpenAI
+        from langfuse.openai import OpenAI
 
         client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
@@ -550,6 +551,14 @@ def _node_compute(state: ChipAgentState) -> ChipAgentState:
     return {**state, "scores": scores, "key_findings": key_findings, "reasoning_steps": steps}
 
 
+@observe(name="chip_agent:verifier:check_narrative", as_type="tool")  # type: ignore[misc]
+def _lf_check_narrative(
+    narrative: str, metrics: dict[str, Any], allow: set[float] | None = None
+) -> list[str]:
+    """Child span: narrative number-safety guard（與其餘 5 個 agent 相同形式）。"""
+    return check_narrative(narrative, metrics, allow=allow)
+
+
 @observe(name="chip_agent:node_signal")  # type: ignore[misc]
 def _node_signal(state: ChipAgentState) -> ChipAgentState:
     """整合分數 → 最終 DomainReport。"""
@@ -576,6 +585,17 @@ def _node_signal(state: ChipAgentState) -> ChipAgentState:
 
     # LLM 摘要
     narrative = _llm_synthesize_chip(symbol, signal, confidence, key_findings)
+
+    # Verifier —— 掃描 narrative 中未經工具驗證的數字（設計原則①）。
+    # 與其餘 5 個 domain agent 相同處置：記錄錯誤但保留 narrative，
+    # 讓 Supervisor 看得到違規證據並據以調整 data_quality，
+    # 而非丟棄輸出把證據吃掉。
+    # 標的代號（台股 4 碼）本身會出現在 LLM 敘述裡，屬合法引用而非幻覺數字。
+    verifier_errors = _lf_check_narrative(
+        narrative, key_findings, allow=symbol_allowlist(symbol)
+    )
+    if verifier_errors:
+        errors.extend(verifier_errors)
 
     steps.append(ReasoningStep(
         thought="整合所有籌碼維度的分數，做出最終方向性判斷。",

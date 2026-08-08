@@ -12,9 +12,39 @@ Used only by @pytest.mark.integration tests; unit tests do not import this fixtu
 """
 from __future__ import annotations
 
-from typing import Any
+import os
 
-import pytest
+# ─────────────────────────────────────────────────────────────────────────────
+# 測試環境隔離 —— 必須在任何 agent / observability import 之前執行
+# ─────────────────────────────────────────────────────────────────────────────
+# observability/langfuse_setup.py 的 _activate() 在 **module import 時**執行，
+# 而測試模組 import agent → import langfuse_setup 發生在 pytest 的 collection
+# 階段，早於任何 fixture。因此這裡不能用 autouse fixture —— 等 fixture 跑起來時
+# observe 早已綁定成真的 langfuse observe，spans 仍會被送出並在 process 結束時
+# 逾時（"Failed to export span batch due to timeout"）。
+#
+# 用 os.environ[...] 而非 setdefault：全專案 8 處 load_dotenv() 皆為預設的
+# override=False（api/main.py、adapters/macro_adapter.py、adapters/news_adapter.py、
+# 3 個 demo script），不會覆蓋已存在的值，故此設定能存活到測試結束。
+#
+# 若要在本機手動驗證 Langfuse trace，請直接跑 demo script，不要跑 pytest。
+#
+# ⚠️ 需要**兩道**閘門，它們是不同機制：
+#   LANGFUSE_ENABLED         —— 本專案自訂，只管 observability/langfuse_setup.py
+#                               要不要把 observe 綁成真的 langfuse observe。
+#   LANGFUSE_TRACING_ENABLED —— Langfuse SDK 官方開關。agents 用的
+#                               `from langfuse.openai import OpenAI` drop-in
+#                               是 SDK 內建的自動 instrumentation，**完全不看**
+#                               我們自訂的 LANGFUSE_ENABLED，只要 .env 有
+#                               PUBLIC_KEY/SECRET_KEY 就會嘗試上傳並在
+#                               process 結束時逾時。少了這道會讓
+#                               "Failed to export span batch" 重新出現。
+os.environ["LANGFUSE_ENABLED"] = "false"
+os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
+
+from typing import Any  # noqa: E402
+
+import pytest  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Integration fixture — skipped automatically if FinancialReports not installed

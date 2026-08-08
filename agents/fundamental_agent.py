@@ -552,8 +552,12 @@ def _node_synthesize(state: FundamentalAgentState) -> dict:
         return {"narrative": "本期無財報資料，略過財務分析。"}
 
     try:
-        from langchain_openai import ChatOpenAI  # type: ignore[import]
-        from langchain_core.messages import HumanMessage  # type: ignore[import]
+        # 原生 OpenAI SDK —— 與其餘 7 個 LLM 呼叫點一致。
+        # 舊版用 langchain_openai.ChatOpenAI，但 langchain 從未宣告在本專案的
+        # pyproject.toml，能 import 純粹因為 financial-agent（editable sibling）
+        # 自己需要它。對方一旦移除 langchain，此處會 import 失敗，
+        # 且因外層 except Exception 包住而**靜默**輸出空白 narrative。
+        from langfuse.openai import OpenAI
 
         meta: FinancialSnapshotWithMeta = state["snapshot"]  # type: ignore[assignment]
 
@@ -569,9 +573,13 @@ def _node_synthesize(state: FundamentalAgentState) -> dict:
             f"品質分數：{m.get('quality_score', 'N/A')}\n"
         )
         update_current_span(input={"model": "gpt-4o-mini", "prompt_length": len(prompt)})
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
-        response = llm.invoke([HumanMessage(content=prompt)])
-        narrative = str(response.content)
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        narrative = (response.choices[0].message.content or "").strip()
         update_current_span(output={"narrative_length": len(narrative), "llm_ok": True})
         return {"narrative": narrative}
     except Exception as exc:

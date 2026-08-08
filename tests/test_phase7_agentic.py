@@ -24,7 +24,7 @@ Design rules (CLAUDE.md)
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, get_args, get_type_hints
 from unittest.mock import patch
 
 import pytest
@@ -44,9 +44,16 @@ from agents.chip_agent import (
     _compute_margin_pressure,
     _compute_shareholding_signal,
     _determine_chip_signal,
+    _fallback_narrative,
+    _llm_synthesize_chip,
     run_chip_agent,
 )
-from router.intent_router import _regex_fallback, route
+from router.intent_router import (
+    _QUERY_TYPE_AGENTS,
+    _SUPERVISOR_QUERY_TYPES,
+    _regex_fallback,
+    route,
+)
 from schemas.agent_signal import AgentType, HardConstraint, Signal, TimeHorizon
 from schemas.domain_report import (
     DomainReport,
@@ -1064,6 +1071,178 @@ class TestRunChipAgent:
                 report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
         assert isinstance(report, DomainReport)
         assert report.narrative_summary == "[fallback narrative]"
+
+
+# ─── chip_agent Verifier 接線（phase_16-B）────────────────────────────────────
+
+
+class TestChipAgentVerifier:
+    """
+    chip_agent 曾是六個 domain agent 中唯一未接 agents/verifier.py 的，
+    僅靠 prompt 文字約束 LLM 不要複讀數字——違反 CLAUDE.md 設計原則①。
+    phase_16-B 接上 check_narrative，處置方式與其餘 5 個 agent 一致：
+    記錄錯誤進 report.errors，但保留 narrative（不丟棄證據）。
+    """
+
+    def _adapter_with_data(self) -> _MockChipAdapter:
+        inst = _inst_rows([
+            ("2026-07-21", 3000.0, 100.0, 0.0),
+            ("2026-07-22", 2000.0, 100.0, 0.0),
+        ])
+        return _MockChipAdapter({
+            "TaiwanStockInstitutionalInvestorsBuySell": inst,
+            "TaiwanStockMarginPurchaseShortSale": [],
+            "TaiwanStockShareholding": [],
+            "TaiwanFuturesInstitutionalInvestors": [],
+        })
+
+    def test_hallucinated_number_is_recorded_as_error(self) -> None:
+        """LLM 吐出不存在於 key_findings 的數字 → 必須被 Verifier 攔下記錄。"""
+        adapter = self._adapter_with_data()
+        with patch(
+            "agents.chip_agent._llm_synthesize_chip",
+            return_value="外資連續買超，融資餘額達 987654 張，籌碼明顯轉強。",
+        ):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert any("未經工具驗證的數字" in e for e in report.errors), (
+            f"Verifier 未攔下幻覺數字 987654；report.errors={report.errors}"
+        )
+
+    def test_hallucinated_narrative_is_preserved_not_discarded(self) -> None:
+        """處置方式是「記錄」而非「丟棄」——narrative 必須原樣保留供稽核。"""
+        bad = "外資連續買超，融資餘額達 987654 張，籌碼明顯轉強。"
+        adapter = self._adapter_with_data()
+        with patch("agents.chip_agent._llm_synthesize_chip", return_value=bad):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert report.narrative_summary == bad
+
+    def test_clean_qualitative_narrative_passes(self) -> None:
+        """純質化敘述（無任何數字）不應產生 Verifier 錯誤。"""
+        adapter = self._adapter_with_data()
+        with patch(
+            "agents.chip_agent._llm_synthesize_chip",
+            return_value="外資買盤延續，籌碼面偏向收斂，短線動能仍在。",
+        ):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert not any("未經工具驗證的數字" in e for e in report.errors), (
+            f"乾淨敘述被誤判；report.errors={report.errors}"
+        )
+
+    def test_number_present_in_key_findings_is_allowed(self) -> None:
+        """引用 key_findings 內真實算出的數值 → 允許，不算幻覺。"""
+        adapter = self._adapter_with_data()
+        # 先跑一次取得真實 key_findings，再用其中的值組 narrative
+        with patch("agents.chip_agent._llm_synthesize_chip", return_value=""):
+            base = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+        consecutive = base.key_findings.get("consecutive_days")
+        assert consecutive is not None, "測試前提不成立：key_findings 缺 consecutive_days"
+
+        with patch(
+            "agents.chip_agent._llm_synthesize_chip",
+            return_value=f"外資連續買超 {consecutive:.0f} 日，籌碼轉強。",
+        ):
+            report = run_chip_agent(symbol="2330", adapter=adapter, asof=_NOW)
+
+        assert not any("未經工具驗證的數字" in e for e in report.errors), (
+            f"引用真實 metrics 被誤判；report.errors={report.errors}"
+        )
+
+
+class TestChipFallbackNarrative:
+    """_fallback_narrative / _llm_synthesize_chip 的 LLM 失敗路徑（原為 0 覆蓋）。"""
+
+    def test_llm_exception_returns_fallback_text(self) -> None:
+        """OpenAI 呼叫拋例外 → 回傳確定性 fallback，不得往上拋。"""
+        with patch("agents.chip_agent.OpenAI", side_effect=RuntimeError("boom"), create=True):
+            out = _llm_synthesize_chip(
+                symbol="2330",
+                signal=Signal.BULLISH,
+                confidence=0.7,
+                key_findings={"institutional_score": 0.5},
+            )
+        assert isinstance(out, str)
+        assert out != ""
+
+    def test_fallback_narrative_is_deterministic_string(self) -> None:
+        out = _fallback_narrative(Signal.BEARISH, {"institutional_score": -0.4}, "some error")
+        assert isinstance(out, str)
+        assert out != ""
+
+
+# ─── 個股 / 組合語意切分（phase_16-E）─────────────────────────────────────────
+
+
+class TestStockInvestmentSplit:
+    """
+    修復前：問「台積電值得買嗎」會路由到 investment_strategy，該類型含 risk agent，
+    而 risk 讀 config/positions.yaml 分析的是「整個組合」的 Greeks。
+    組合中不相干部位一旦 breach，會透過 Supervisor Layer 1 強制降級整個個股建議。
+
+    修復後：個股走 stock_investment（無 risk），組合走 investment_strategy（含 risk）。
+    """
+
+    def test_stock_investment_excludes_risk_agent(self) -> None:
+        agents = _QUERY_TYPE_AGENTS["stock_investment"]
+        assert "risk" not in agents, (
+            f"個股投資建議不應含 risk agent（組合層曝險與所查個股無關）；got {agents}"
+        )
+
+    def test_investment_strategy_keeps_risk_agent(self) -> None:
+        """組合層策略仍須含 risk —— 此情境下強制降級是正確行為。"""
+        assert "risk" in _QUERY_TYPE_AGENTS["investment_strategy"]
+
+    def test_stock_investment_covers_all_non_risk_domains(self) -> None:
+        """排除 risk 之外，其餘六個 domain agent 都要在。"""
+        agents = set(_QUERY_TYPE_AGENTS["stock_investment"])
+        assert agents == {
+            "technical", "chip", "news", "fundamental", "macro", "cross_market",
+        }
+
+    def test_both_investment_types_run_supervisor_and_debate(self) -> None:
+        """兩種投資建議類型都要經過 Supervisor 仲裁與 Debate。"""
+        assert "stock_investment" in _SUPERVISOR_QUERY_TYPES
+        assert "investment_strategy" in _SUPERVISOR_QUERY_TYPES
+
+    def test_non_investment_types_skip_supervisor(self) -> None:
+        for qt in ("stock_analysis", "fundamental_review", "macro_outlook", "portfolio_risk"):
+            assert qt not in _SUPERVISOR_QUERY_TYPES, f"{qt} 不應觸發 Supervisor"
+
+    def test_every_query_type_has_agent_mapping(self) -> None:
+        """
+        RouterOutput 的 Literal 與 _QUERY_TYPE_AGENTS 必須完全對齊。
+
+        用 get_type_hints() 而非 __dataclass_fields__[].type：後者在
+        `from __future__ import annotations` 下回傳的是**字串**，
+        get_args() 對字串回傳空 tuple，斷言會假性通過（實測踩到）。
+        """
+        literal_types = set(get_args(get_type_hints(RouterOutput)["query_type"]))
+        assert literal_types == set(_QUERY_TYPE_AGENTS), (
+            f"schema Literal 與 _QUERY_TYPE_AGENTS 不一致：\n"
+            f"  只在 Literal：{literal_types - set(_QUERY_TYPE_AGENTS)}\n"
+            f"  只在 mapping：{set(_QUERY_TYPE_AGENTS) - literal_types}"
+        )
+
+
+class TestRegexFallbackInvestmentRouting:
+    """keyword fallback 的個股投資建議路由（LLM 不可用時的降級路徑）。"""
+
+    def test_strategy_keyword_routes_to_stock_investment(self) -> None:
+        out = _regex_fallback("2330 現在值得買嗎")
+        assert out.query_type == "stock_investment"
+        assert "risk" not in out.agents
+
+    def test_strategy_query_runs_supervisor_and_debate(self) -> None:
+        out = _regex_fallback("台積電適合買嗎")
+        assert out.run_supervisor is True
+        assert out.run_debate is True
+
+    def test_portfolio_keyword_still_wins_over_strategy(self) -> None:
+        """組合關鍵字在 if-chain 更前面，不應被 strategy 分支搶走。"""
+        out = _regex_fallback("我的選擇權組合現在適合加碼嗎")
+        assert out.query_type == "portfolio_risk"
 
 
 # ─── router/intent_router.py ─────────────────────────────────────────────────

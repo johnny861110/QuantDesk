@@ -42,10 +42,20 @@ React + TypeScript SSE Dashboard（即時串流）
 | query_type | 觸發範例 | Agent 組合 | Supervisor |
 |-----------|---------|-----------|-----------|
 | `stock_analysis` | 「2330 技術面」「台積電外資動向」 | technical + chip + news | ✗ |
-| `investment_strategy` | 「台積電值得買嗎」「2330 完整分析」 | 全部 7 個 | ✓ + Debate |
+| `stock_investment` | 「台積電值得買嗎」「2330 完整分析」 | 6 個（**不含 risk**） | ✓ + Debate |
+| `investment_strategy` | 「我的組合該怎麼調整」「整體部位配置」 | 全部 7 個（含 risk） | ✓ + Debate |
 | `fundamental_review` | 「台積電財報」「2330 ROE」 | fundamental + chip | ✗ |
 | `macro_outlook` | 「總經環境」「聯準會降息影響」 | macro + cross_market | ✗ |
 | `portfolio_risk` | 「我的 delta 曝險」「組合風控」 | risk | ✗ |
+
+> **個股 vs 組合為什麼要分開**：risk agent 讀 `config/positions.yaml` 分析的是
+> **整個投資組合**的 Greeks 曝險。若問「台積電值得買嗎」時納入 risk，組合中
+> 不相干部位一旦觸發硬約束，會透過 Supervisor Layer 1 強制降級整個個股建議
+> （confidence 壓到 0.35）。故個股建議走 `stock_investment`（無 risk），
+> 組合策略才走 `investment_strategy`（含 risk，該情境下強制降級是正確行為）。
+>
+> ⚠️ `stock_investment` 模式**不評估組合風控** —— 若你持有已 breach 的部位，
+> 問個股時不會收到警告，需另外查詢組合策略或 `portfolio_risk`。
 
 ---
 
@@ -78,7 +88,7 @@ cd dashboard && npm run dev
 ```bash
 uv run ruff check .          # lint — 零 error 零 warning
 uv run mypy .                # 型別 — zero issues
-uv run pytest -q             # 867 passed
+uv run pytest -q             # 919 passed / 1 skipped
 cd dashboard && npm run build # frontend build
 ```
 
@@ -205,6 +215,7 @@ quantdesk-starter/
 │   ├── fx_adapter.py
 │   ├── macro_adapter.py
 │   ├── news_adapter.py      # Google News RSS + Tavily + MOPS
+│   ├── ticker_registry.py   # 離線代碼→名稱查表（無執行期網路）
 │   ├── options_adapter.py   # FinMind IV 反推
 │   └── price_adapter.py
 ├── schemas/
@@ -218,7 +229,9 @@ quantdesk-starter/
 ├── router/
 │   └── intent_router.py     # LLM + regex fallback 意圖分類
 ├── config/positions.yaml    # 持倉設定（前端可互動修改）
-├── tests/                   # 867 tests（pytest + pytest-cov）
+├── data/tickers.jsonl       # 台股+美股 ticker 註冊表（13,531 筆，進版控）
+├── scripts/refresh_ticker_registry.py  # 重新產生上表
+├── tests/                   # 919 tests（pytest + pytest-cov）
 ├── dashboard/src/
 │   ├── App.tsx              # 主頁（sidebar 佈局）
 │   ├── types.ts
@@ -265,6 +278,10 @@ Greeks、財務指標、技術指標、統計量一律由純 Python 計算。LLM
 | 13 | Frontend Pro（recharts + constraints + 歷史 + 匯出）| ✅ |
 | 14 | Engineering Quality（E2E + CI frontend + coverage）| ✅ |
 | 15 | Query-Type Routing + Async 重構 + 新聞修復 + UI 重大改版 | ✅ |
+| 16 | Truth & Correctness（文件對帳 + chip Verifier + verifier 修復 + SDK 統一 + query_type 切分）| ✅ |
+| 17 | Evaluation Framework（prompt 快照 + golden set + faithfulness）| 📋 |
+
+> Phase 16/17 計畫見 `docs/tasks/phase_16.md`
 
 ---
 

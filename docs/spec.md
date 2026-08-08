@@ -7,6 +7,23 @@
 
 ---
 
+> ## ⚠️ 文件狀態說明（2026-08-05 加註）
+>
+> **本文是 v1.0 原始設計藍圖，寫於實作開始之前，未隨實作同步更新。**
+> 閱讀時請注意以下與現況的差異，實作現況以 `CLAUDE.md` 與 `README.md` 為準：
+>
+> | 本文描述 | 實作現況 |
+> |---|---|
+> | 「**六**大 Domain Agent」（全篇） | 實際 **七個** —— Phase 7 新增 **chip agent**（籌碼面：三大法人 / 融資券 / 外資持股 / 期貨法人部位），本文未涵蓋其規格 |
+> | §4.3 財報 agent 含「質化 RAG」（`document_chunks` + embedding + hybrid retrieval） | **本 repo 未實作**。依 §1 的職責劃分，此部分屬 `FinancialReports` repo，詳見 `docs/rag_spec.md` 頂部範圍註記 |
+> | §8.2 Evaluation：golden set 跑進 CI/CD 做迴歸測試 | **尚未實作**，已排入 Phase 17（見 `docs/tasks/phase_16.md`） |
+> | §10 Phase 0-6 路線圖 | 實際已執行到 Phase 15，且中途新增了 Router LLM / Chip Agent / Synthesis LLM / Debate / React Dashboard 等本文未規劃的內容 |
+>
+> **本文仍然有效的部分**：§0 設計哲學、§3 Schema 設計理由、§5 Supervisor 三層仲裁邏輯、
+> §6 Adapter 抽象原則、§9 Production 硬化清單——這些是實作確實遵循的架構決策。
+
+---
+
 ## 目錄
 0. 定位與設計哲學
 1. 現有兩專案的角色重定位

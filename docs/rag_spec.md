@@ -1,5 +1,22 @@
 # 財報 Agentic RAG System — 架構設計與 Production 全解
 
+> ## ⚠️ 範圍註記（2026-08-05 加註）
+>
+> **本文描述的 RAG 系統不在 `quantdesk-starter` 的實作範圍內，本 repo 零實作。**
+>
+> 依 `docs/spec.md §1` 的職責劃分，財報的**資料層與敘述檢索層屬 `FinancialReports` repo**
+> （該 repo 的 `vector_store.py` 目前仍是 ChromaDB 佔位，`document_chunks` 已切好但
+> 未做 embedding 與檢索）。`quantdesk-starter` 的 `agents/fundamental_agent.py`
+> 只消費 `FinancialReports` 已結構化的**數字**（`financial_facts` / `financial_metrics`），
+> 不做語意檢索。
+>
+> **因此本 repo 的財報 agent 目前只能回答量化問題，無法回答
+> 「管理階層對下季展望怎麼說」這類質化問題**——這是已知且刻意的範圍界線，不是缺陷。
+>
+> 本文保留於此作為**架構參考與設計記錄**。若要實作，工作應發生在 `FinancialReports` repo。
+>
+> ---
+
 > 場景：處理台股上市公司公開財報（XBRL → iXBRL → PDF），支援「單一公司財報問答」「跨期間比較」「跨公司比較」的 agentic 問答系統。所有場景為公開資訊 + 通用架構模式重現，不涉及任何機密內部細節。
 
 ---

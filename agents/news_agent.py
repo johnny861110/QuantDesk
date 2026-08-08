@@ -576,7 +576,7 @@ def _node_llm_analyse(state: NewsAgentState) -> NewsAgentState:
     if client is None:
         # Lazy initialise real OpenAI client (reads from env)
         try:
-            import openai  # lazy import
+            from langfuse import openai  # lazy import (Langfuse drop-in)
             key = _require_env("OPENAI_API_KEY")
             client = openai.OpenAI(api_key=key)
         except Exception as exc:
