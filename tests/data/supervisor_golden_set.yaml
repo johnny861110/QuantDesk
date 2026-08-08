@@ -1,0 +1,129 @@
+# Supervisor Golden Set —— Phase 17 L3
+#
+# 兌現 docs/spec.md §8.2「Supervisor 層：建立 golden set（歷史情境 + 專家標註的
+# 合理綜合判斷），評估匯總結論是否合理、硬約束是否正確觸發、時間框架分層是否恰當」。
+#
+# 定位（重要）
+# -----------
+# 本檔**不取代** tests/test_phase5_supervisor.py 的 91 個測試。
+# 那些測試涵蓋率已達 98%，重寫成 YAML 是 churn 而非改善。
+#
+# 本檔的價值在於「新增仲裁情境的成本降到只要寫幾行 YAML」——
+# 未來調整權重、新增 agent、改仲裁規則時，可以先在這裡描述期望行為，
+# 不必每次都寫一支 Python 測試。
+#
+# 欄位
+# ----
+#   name          情境名稱
+#   why           這個情境在守護什麼設計決策
+#   signals[]     輸入的 AgentSignal（簡化描述，由 harness 建成真正的物件）
+#     agent         risk|technical|fundamental|news|macro|cross_market|chip
+#     signal        bullish|bearish|neutral
+#     confidence    0.0-1.0
+#     horizon       intraday|short|medium|long
+#     completeness  選填，預設 1.0（0.0 = 降級輸出，應被排除出投票池）
+#     breached      選填，帶此欄會產生一個 breached=True 的 hard_constraint
+#     unverifiable  選填，帶此欄會產生一個 verifiable=False 的 hard_constraint
+#   expect
+#     risk_override            選填，bool
+#     recommendation           選填，bullish|bearish|neutral
+#     max_confidence           選填，float（實際信心不得高於此值）
+#     requires_human_review    選填，bool
+#     excluded_agents          選填，list —— 必須被排除出方向性投票池
+#     voting_agents            選填，list —— 必須參與方向性投票
+#     mandatory_warning_types  選填，list —— 必須出現的警告類型
+
+# ── Layer 1：硬約束強制降級（設計原則②）────────────────────────────────────
+- name: risk_breach_forces_override
+  why: >
+    任何 breached=True 都必須觸發 risk_override 並強制壓低信心。
+    這是 CLAUDE.md 設計原則②，由規則引擎執行、不得由 LLM 裁量。
+  signals:
+    - {agent: technical, signal: bullish, confidence: 0.9, horizon: short}
+    - {agent: fundamental, signal: bullish, confidence: 0.9, horizon: long}
+    - {agent: risk, signal: neutral, confidence: 0.8, horizon: short,
+       breached: net_delta_pct_nav}
+  expect:
+    risk_override: true
+    max_confidence: 0.35
+    requires_human_review: true
+    mandatory_warning_types: ["net_delta_pct_nav"]
+
+- name: unverifiable_constraint_treated_as_breach
+  why: >
+    verifiable=False 代表「無法確認未違反」。保守處置必須與 breached=True 同等，
+    否則 Greeks 資料缺失會被誤讀成「安全」。
+  signals:
+    - {agent: technical, signal: bullish, confidence: 0.85, horizon: short}
+    - {agent: risk, signal: neutral, confidence: 0.5, horizon: short,
+       unverifiable: gamma_limit}
+  expect:
+    risk_override: true
+    max_confidence: 0.35
+    requires_human_review: true
+    mandatory_warning_types: ["unverifiable:gamma_limit"]
+
+- name: no_breach_no_override
+  why: 對照組——沒有任何 breach 時不得誤觸發強制降級。
+  signals:
+    - {agent: technical, signal: bullish, confidence: 0.8, horizon: short}
+    - {agent: fundamental, signal: bullish, confidence: 0.85, horizon: long}
+  expect:
+    risk_override: false
+    recommendation: bullish
+
+# ── Layer 3：排除規則（spec §5.3 + 降級旗標）───────────────────────────────
+- name: cross_market_never_votes_directionally
+  why: >
+    spec.md §5.3：cross_market 輸出的是市場 regime 而非標的方向。
+    它的 bearish 只代表台美連動背離，納入投票會錯誤壓低多頭共識。
+  signals:
+    - {agent: technical, signal: bullish, confidence: 0.8, horizon: short}
+    - {agent: cross_market, signal: bearish, confidence: 0.9, horizon: medium}
+  expect:
+    excluded_agents: [cross_market]
+    recommendation: bullish
+
+- name: degraded_agent_excluded_from_vote
+  why: >
+    completeness=0.0 是明確的降級旗標（LLM 失敗 / 無近期事件）。
+    降級輸出不得influence方向性結論，否則等於讓「沒有資訊」變成一票。
+  signals:
+    - {agent: technical, signal: bullish, confidence: 0.8, horizon: short}
+    - {agent: news, signal: bearish, confidence: 0.6, horizon: short, completeness: 0.0}
+  expect:
+    excluded_agents: [news]
+    voting_agents: [technical]
+    recommendation: bullish
+
+- name: risk_agent_not_in_directional_pool
+  why: risk agent 走 Layer 1，不參與方向性投票（否則會被重複計算兩次）。
+  signals:
+    - {agent: technical, signal: bullish, confidence: 0.8, horizon: short}
+    - {agent: risk, signal: bearish, confidence: 0.7, horizon: short}
+  expect:
+    excluded_agents: [risk]
+    recommendation: bullish
+
+# ── Layer 2：時間框架分層（不強融成單一結論）───────────────────────────────
+- name: conflicting_horizons_are_not_averaged_away
+  why: >
+    spec.md §5.1②：短期技術轉弱、長期基本面支撐，兩者不該被平均成 NEUTRAL
+    而消去資訊。horizon_breakdown 必須各自保留分層結論。
+  signals:
+    - {agent: technical, signal: bearish, confidence: 0.8, horizon: short}
+    - {agent: fundamental, signal: bullish, confidence: 0.85, horizon: long}
+  expect:
+    horizon_signals: {short: bearish, long: bullish}
+
+# ── Layer 3：信心加權（來源可靠度差異）─────────────────────────────────────
+- name: source_reliability_breaks_the_tie
+  why: >
+    同一 horizon 內方向衝突時，按 confidence × data_quality × 來源可靠度加權，
+    非等權平均。fundamental(1.0) 的可靠度高於 news(0.60)，
+    同信心下應由 fundamental 勝出。
+  signals:
+    - {agent: fundamental, signal: bullish, confidence: 0.7, horizon: medium}
+    - {agent: news, signal: bearish, confidence: 0.7, horizon: medium}
+  expect:
+    recommendation: bullish

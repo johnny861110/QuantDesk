@@ -106,10 +106,12 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
 - [x] Phase 15：Query-Type Routing + Async 重構 + 新聞修復 + AgentSidebar / PositionsPanel
 - [x] Phase 16：Truth & Correctness（文件真實性對帳 + chip Verifier + 測試隔離 +
       SDK 統一/Langfuse cost + query_type 個股/組合切分）— 計畫見 `docs/tasks/phase_16.md`
-- [ ] Phase 17：Evaluation Framework（prompt 快照 / router golden set /
+- [x] Phase 17：Evaluation Framework（prompt 快照 / router golden set /
       supervisor 資料驅動情境 / narrative faithfulness）— 兌現 `docs/spec.md §8.2`
 
-> 測試基準：**919 passed / 1 skipped**（2026-08-08 實測）。
+> 測試基準：**1123 passed / 1 skipped / 2 deselected**（2026-08-09 實測）。
+> deselected 是 `llm_eval` 標記的真實 LLM 評估，預設排除（會產生 API 費用），
+> 手動執行：`uv run pytest -m llm_eval -q -s`
 > 修改此數字前請先實跑 `uv run pytest -q --cov`，不要沿用舊值。
 
 <!-- gitnexus:start -->

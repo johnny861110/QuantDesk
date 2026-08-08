@@ -10,9 +10,10 @@
 
 - **已完成**：Phase 0-15（骨架 → 七個 domain agent → Supervisor 仲裁 → Debate →
   React SSE Dashboard → Query-Type Routing）
-- **已完成**：Phase 16 — Truth & Correctness（branch `phase-16-hardening`，5 顆 commit）
-- **下一步**：Phase 17 — Evaluation Framework
-- **測試基準**：903 passed / 1 skipped、ruff & mypy 全綠、0 import 循環依賴
+- **已完成**：Phase 16 — Truth & Correctness（branch `phase-16-hardening`，7 顆 commit）
+- **已完成**：Phase 17 — Evaluation Framework（branch `phase-17-evaluation`，L1-L4 全數）
+- **下一步**：Phase 19 — 前端品質（dashboard 目前 0 測試、無 ESLint）
+- **測試基準**：1123 passed / 1 skipped / 2 deselected、ruff & mypy 全綠、0 import 循環依賴
 
 ---
 
