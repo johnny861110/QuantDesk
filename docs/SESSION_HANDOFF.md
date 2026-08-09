@@ -1,13 +1,14 @@
 # QuantDesk — Session Handoff Document
 > 給下一個 Claude Code session 的完整專案交接文件
-> 最後更新：2026-08-05（Phase 16 完成）
-> Git HEAD：branch `phase-16-hardening`，尚未 push / 尚未開 PR
+> 最後更新：2026-08-09（Phase 19 完成，全部合併進 `main`）
+> Git HEAD：`main`，無殘留分支
 >
-> ⚠️ 本文件 §二～§六 描述的是 **2026-07-25 Phase 15 當下**的狀態，未逐段重寫。
-> 已知過期處：§三 測試數 867（現為 **903**）、§五 tests/ 867、
-> §一 與 §四 未涵蓋 Phase 16 新增的 `stock_investment` query_type。
-> **最新狀態以 `README.md` / `CLAUDE.md` / `docs/tasks/phase_16.md` 為準。**
-> §七 已知問題清單已於 2026-08-05 全面對帳，是本文件最新的一節。
+> ⚠️ **§二 是 2026-07-25 Phase 15 當下的工作紀錄**，屬歷史，不代表現況。
+> §三（狀態）、§五（結構）、§六（環境變數）、§七（已知問題）已於 2026-08-09 對帳。
+>
+> §一 與 §四 的架構圖尚未涵蓋 Phase 16 新增的 `stock_investment` query_type
+> （個股投資建議，**不含 risk agent**——見 §七 P0-1）。
+> 完整 query_type 路由表以 `README.md` 為準。
 
 ---
 
@@ -76,7 +77,8 @@ QuantDesk 是一個**多智能體量化投研系統**：7 個 Domain Agent 並�
 ```
 ruff:   All checks passed（零 error 零 warning）
 mypy:   0 issues, 70 source files
-pytest: 867 passed, 1 skipped
+pytest: 1123 passed, 1 skipped, 2 deselected（deselected = llm_eval 標記，預設排除）
+vitest: 146 passed（前端，覆蓋率 80%）
 build:  npm run build ✓
 ```
 
@@ -148,7 +150,9 @@ quantdesk-starter/
 │   ├── macro_adapter.py
 │   ├── news_adapter.py      ← Google News RSS + Tavily + MOPS
 │   ├── options_adapter.py   ← FinMind IV 反推
-│   └── price_adapter.py
+│   ├── price_adapter.py
+│   ├── stock_info_adapter.py  ← FinMind 全市場股票清單
+│   └── ticker_registry.py     ← 離線代碼→名稱查表（Phase 16）
 ├── schemas/
 │   ├── agent_signal.py      ← AgentSignal、HardConstraint 等
 │   ├── debate.py
@@ -163,11 +167,22 @@ quantdesk-starter/
 │   └── langfuse_setup.py
 ├── config/
 │   └── positions.yaml       ← 持倉設定（前端可互動修改）
-├── tests/                   ← 867 tests
+├── data/
+│   └── tickers.jsonl        ← 台股 3,133 + 美股 10,398 ticker 註冊表（進版控）
+├── scripts/
+│   └── refresh_ticker_registry.py  ← 重新產生上表（需 SEC_USER_AGENT）
+├── tests/                   ← 1123 tests（含 Phase 17 評估框架 golden sets）
 ├── dashboard/
+│   ├── eslint.config.js     ← ESLint flat config（Phase 19）
+│   ├── vite.config.ts       ← 含 vitest 設定
 │   └── src/
 │       ├── App.tsx           ← 主頁（sidebar 佈局）
 │       ├── types.ts
+│       ├── lib/
+│       │   └── validatePosition.ts  ← 持倉欄位驗證（鏡射後端契約，Phase 19）
+│       ├── test/
+│       │   ├── setup.ts             ← 結構性保證測試不打真實網路
+│       │   └── mockEventSource.ts   ← 可控 SSE 替身
 │       ├── hooks/
 │       │   ├── useAnalysis.ts   ← analyze() + analyzeAgent() + retry()
 │       │   └── useQueryHistory.ts
@@ -183,9 +198,16 @@ quantdesk-starter/
 │               ├── ChipFlowChart.tsx
 │               ├── RiskGreeksChart.tsx
 │               └── TechnicalRadar.tsx
+├── tests/                   ← 後端 1123 tests
+│   ├── data/                ← golden sets（router / supervisor）
+│   ├── test_eval_prompts.py       ← Phase 17 L1
+│   ├── test_eval_router.py        ← Phase 17 L2
+│   ├── test_eval_supervisor.py    ← Phase 17 L3
+│   └── test_eval_faithfulness.py  ← Phase 17 L4
 └── docs/
     ├── SESSION_HANDOFF.md   ← 本文件
-    └── spec.md
+    ├── spec.md
+    └── tasks/phase_16.md    ← Phase 16-17 完整計畫與執行紀錄
 ```
 
 ---
@@ -199,13 +221,15 @@ quantdesk-starter/
 | `TAVILY_API_KEY` | 新聞第三層搜尋 | ✅ 選填 |
 | `LANGFUSE_ENABLED` | Langfuse tracing | ✅ 選填 |
 | `FINANCIAL_DB_PATH` | SQLite 財報資料庫 | ⚠️ 預設 `../FinancialReports/data/financial.db` |
+| `LANGFUSE_TRACING_ENABLED` | Langfuse **SDK 官方**開關。`langfuse.openai` drop-in 只看這道，不看 `LANGFUSE_ENABLED` | ✅ 選填（測試中強制 false） |
+| `SEC_USER_AGENT` | `scripts/refresh_ticker_registry.py` 抓 SEC 美股清單用。SEC 規定 User-Agent 須含聯絡方式，否則被擋 | ⚠️ 執行該 script 時需要 |
 
 ---
 
 ## 七、已知問題與 Tech Debt
 
-> **狀態對帳日期：2026-08-05**（Phase 16-A 全面複驗）
-> ⬜ 未解 ／ ✅ 已解（Phase 16 已全數執行完畢）
+> **狀態對帳日期：2026-08-09**（Phase 16/17/19 完成後全面複驗）
+> ⬜ 未解 ／ ✅ 已解
 
 ### P0（影響結果正確性）
 1. ✅ **Risk agent 是組合層級，非個股**：`positions.yaml` 分析的是整個投資組合，不是查詢的個股。`stock_analysis` 模式現在已排除 risk agent，但 `investment_strategy` 仍會跑 risk 並可能因組合 breach 強制降級整個策略建議。
@@ -225,7 +249,9 @@ quantdesk-starter/
    → **Phase 19 已修復**：三張圖表改用 React.lazy 動態載入，recharts 拆為按需 chunk。
      主 bundle 646.62 kB → **254.01 kB**（gzip 190.25 → 76.91 kB，降 60%），
      >500kB 警告消失。多數查詢不會同時跑到 risk/technical/chip，本來就不需載入 recharts。
-8. ⬜ **單 agent endpoint 無 symbol 輸入提示**：sidebar 點 agent 時用當前 Router 解析到的 symbol，若沒有則預設 2330。
+8. ✅ **單 agent endpoint 無 symbol 輸入提示**：sidebar 點 agent 時用當前 Router 解析到的 symbol，若沒有則預設 2330。
+   → **已修復**：Phase 15 移除硬編碼 2330 fallback，未選標的時 agent 按鈕一律 `disabled`
+     並顯示「請先搜尋並選擇標的」；Phase 19 補上測試守護（七個按鈕全部停用）。
 9. ✅ **PositionsPanel 未做欄位驗證**：例如 option 沒填 strike 可能導致 risk agent 失敗。
    → **Phase 19 已修復**：新增 `dashboard/src/lib/validatePosition.ts`，
      規則逐條鏡射後端 `position_loader.py::_parse_row()`（含 T≤0 到期防呆）。
@@ -246,7 +272,11 @@ quantdesk-starter/
       對照組：修復前的 `debate:*_llm_call` 歷史紀錄為 `model=None, usage=0, cost=None`。
 13. ✅ **LangChain 孤例 + 隱性跨 repo 依賴**：`fundamental_agent.py:555` 是全專案唯一用 `langchain_openai` 的地方，且 langchain 未在本專案 `pyproject.toml` 宣告，靠 `financial-agent` 順帶帶入。
     → **Phase 16-D 已修復**，agents/ router/ supervisor/ api/ schemas/ 已無 langchain。
-14. ⬜ **改任何 prompt，903 個測試全部照過**：無任何測試斷言 prompt 內容，LLM 一律 mock。
+14. ✅ **改任何 prompt，測試全部照過**：無任何測試斷言 prompt 內容，LLM 一律 mock。
+    → **Phase 17 L1 已修復**：`tests/test_eval_prompts.py`（31 項）——
+      6 個 prompt 的 SHA256 快照 + 不變量（設計原則①②、OpenAI json_object
+      硬性要求、`_QUERY_TYPE_AGENTS ↔ _ROUTER_SYSTEM_PROMPT` 跨檔案一致性、
+      prompt-injection 防線）。已用突變測試驗證 4 種真實 bug 都會被抓到。
     → **Phase 17 Evaluation Framework 處理**。
 15. ✅ **agents/verifier.py 對 4 位數以上數字全盲**（Phase 16-F 新發現）：
     `_NUM_RE` 只匹配 ≤3 位數或帶逗號格式，`1234` / `987654` / `-80773006`
@@ -296,7 +326,7 @@ open http://localhost:5173
 ```bash
 uv run ruff check .   # lint — 零 error
 uv run mypy .         # 型別檢查 — zero issues
-uv run pytest -q      # 867 passed
+uv run pytest -q      # 1123 passed
 cd dashboard && npm run build  # frontend build
 ```
 
@@ -308,5 +338,5 @@ cd dashboard && npm run build  # frontend build
 2. **硬約束是強制規則**：`hard_constraints[].breached=True` → Supervisor 必須降級，不能被 LLM 覆蓋
 3. **每個 key_evidence 必須有 source + asof**
 4. **新增 agent 不動 Supervisor 核心**：只加 node 並在 `_stream_analysis_with_router` 的 `_ALL_BUILDERS` dict 裡註冊
-5. **依賴管理用 uv**：`uv add <pkg>`，不用 pip，不改 requirements.txt
+5. **依賴管理用 uv**：`uv add <pkg>`，不用 pip。本專案**沒有** requirements.txt（刻意移除，見下）
 6. **不直接 push main**：所有工作在 feature branch，PR 合併前 CI 必須全綠
