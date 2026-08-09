@@ -10,5 +10,8 @@ __pycache__/
 dashboard/node_modules/
 dashboard/dist/
 dashboard/tsconfig.tsbuildinfo
+# vitest 覆蓋率輸出（Phase 19 起可用 npm run test:cov）。
+# 目前 reporter 設為 text 不產檔，但改成 html/lcov（CI 上傳常用）就會產生此目錄。
+dashboard/coverage/
 htmlcov/
 .coverage
