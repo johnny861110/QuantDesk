@@ -117,8 +117,8 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
 
 - [x] Phase 19：前端品質（vitest + ESLint + code splitting，dashboard 146 tests / 80% 覆蓋）
 
-> 測試基準：後端 **1123 passed / 1 skipped / 2 deselected**、
-> 前端 **146 passed**（覆蓋率 80%）（2026-08-09 實測）。
+> 測試基準：後端 **1125 passed / 1 skipped / 2 deselected**、
+> 前端 **146 passed**（覆蓋率 80%）（2026-08-10 實測）。
 > deselected 是 `llm_eval` 標記的真實 LLM 評估，預設排除（會產生 API 費用），
 > 手動執行：`uv run pytest -m llm_eval -q -s`
 > 修改此數字前請先實跑 `uv run pytest -q --cov`，不要沿用舊值。
@@ -126,7 +126,7 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **QuantDesk** (4191 symbols, 8366 relationships, 226 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **QuantDesk** (4196 symbols, 8379 relationships, 226 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

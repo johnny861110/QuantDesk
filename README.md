@@ -88,7 +88,7 @@ cd dashboard && npm run dev
 ```bash
 uv run ruff check .          # lint — 零 error 零 warning
 uv run mypy .                # 型別 — zero issues
-uv run pytest -q             # 1123 passed / 1 skipped / 2 deselected
+uv run pytest -q             # 1125 passed / 1 skipped / 2 deselected
 cd dashboard && npm run lint  # 前端 lint — 0 problems
 cd dashboard && npm run test  # 前端 146 tests
 cd dashboard && npm run build # frontend build
@@ -258,7 +258,7 @@ quantdesk-starter/
 ├── config/positions.yaml    # 持倉設定（前端可互動修改）
 ├── data/tickers.jsonl       # 台股+美股 ticker 註冊表（13,531 筆，進版控）
 ├── scripts/refresh_ticker_registry.py  # 重新產生上表
-├── tests/                   # 1123 tests（pytest + pytest-cov）
+├── tests/                   # 1125 tests（pytest + pytest-cov）
 │   └── data/                # golden sets（router / supervisor）
 ├── dashboard/               # 146 tests（vitest），覆蓋率 80%
 │   ├── eslint.config.js     # ESLint flat config
@@ -316,9 +316,9 @@ Greeks、財務指標、技術指標、統計量一律由純 Python 計算。LLM
 | 15 | Query-Type Routing + Async 重構 + 新聞修復 + UI 重大改版 | ✅ |
 | 16 | Truth & Correctness（文件對帳 + chip Verifier + verifier 修復 + SDK 統一 + query_type 切分）| ✅ |
 | 17 | Evaluation Framework（prompt 快照 + golden set + faithfulness）| ✅ |
-
 | 19 | 前端品質（vitest + ESLint + code splitting）| ✅ |
 
+> 無 Phase 18——原規劃編號在 Phase 16 重評估時併入 16/17，未另立。
 > Phase 16/17 計畫見 `docs/tasks/phase_16.md`
 
 ---
