@@ -240,6 +240,11 @@ export function PositionsPanel({ onClose }: Props) {
     }
   }, [])
 
+  // 掛載時載入持倉——這是 effect 的正當用途（向外部系統取資料）。
+  // react-hooks/set-state-in-effect 之所以報錯，是因為 load() 會同步呼叫
+  // setLoading(true) 才進入 await。為了消除告警而把 loading 狀態延後，
+  // 只會讓 UI 短暫顯示空面板，是為了取悅 linter 而犧牲使用者體驗。
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load() }, [load])
 
   // Serializes all writes onto one promise chain so overlapping saves land on

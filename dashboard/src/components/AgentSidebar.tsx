@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import type { AgentPayload, Signal } from '../types'
 
 interface SymbolMatch {
@@ -48,7 +48,18 @@ function SymbolSearch({ value, onChange }: { value: string | null; onChange: (sy
   const [open, setOpen] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => { setInput(value ?? '') }, [value])
+  // 外部 value 變動時同步到可編輯的 input。
+  //
+  // 用 React 官方的「render 期間調整 state」模式，而非 useEffect：
+  // effect 版本（原寫法）要等 render 提交後才更新，會多一次 render pass，
+  // 使用者可能瞬間看到舊值。此寫法 React 會在同一次 render 內重跑此元件，
+  // 不會產生可見的中間狀態。
+  // 參考 react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevValue, setPrevValue] = useState(value)
+  if (value !== prevValue) {
+    setPrevValue(value)
+    setInput(value ?? '')
+  }
 
   const handleInput = (v: string) => {
     setInput(v)
