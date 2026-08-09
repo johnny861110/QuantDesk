@@ -5,6 +5,7 @@
  * PUT /api/positions  → save changes back to positions.yaml
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { validatePosition } from '../lib/validatePosition'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -117,31 +118,45 @@ function PositionModal({
   onClose: () => void
 }) {
   const [pos, setPos] = useState<Position>({ ...initial })
+  // 是否已嘗試送出——未送出前不顯示錯誤，避免使用者剛打開就滿screen紅字
+  const [attempted, setAttempted] = useState(false)
+
+  const errors = validatePosition(pos)
+  const showError = (key: string) => (attempted ? errors[key] : undefined)
 
   const field = (
     key: keyof Position,
     label: string,
     type: 'text' | 'number' | 'date' = 'text',
     required = true,
-  ) => (
-    <div>
-      <label className="block text-[11px] text-gray-500 mb-0.5">{label}{required && ' *'}</label>
-      <input
-        type={type}
-        value={(pos[key] as string | number | null | undefined) ?? ''}
-        onChange={e => setPos(p => ({
-          ...p,
-          [key]: type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value,
-        }))}
-        className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-white outline-none focus:border-blue-500"
-      />
-    </div>
-  )
+  ) => {
+    const err = showError(key)
+    return (
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-0.5">{label}{required && ' *'}</label>
+        <input
+          type={type}
+          aria-label={label}
+          aria-invalid={err ? true : undefined}
+          value={(pos[key] as string | number | null | undefined) ?? ''}
+          onChange={e => setPos(p => ({
+            ...p,
+            [key]: type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value,
+          }))}
+          className={`w-full rounded border bg-gray-900 px-2 py-1.5 text-xs text-white outline-none ${
+            err ? 'border-red-600 focus:border-red-500' : 'border-gray-700 focus:border-blue-500'
+          }`}
+        />
+        {err && <p role="alert" className="mt-0.5 text-[10px] text-red-400">{err}</p>}
+      </div>
+    )
+  }
 
   const select = <K extends keyof Position>(key: K, label: string, options: string[]) => (
     <div>
       <label className="block text-[11px] text-gray-500 mb-0.5">{label} *</label>
       <select
+        aria-label={label}
         value={(pos[key] as string) ?? ''}
         onChange={e => setPos(p => ({ ...p, [key]: e.target.value as Position[K] }))}
         className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-white outline-none focus:border-blue-500"
@@ -166,7 +181,7 @@ function PositionModal({
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             {field('symbol', '代碼（如 2330.TW / TXFF）')}
-            {select('instrument_type', '類型', ['stock', 'futures', 'option'])}
+            {select('instrument_type', '商品類型', ['stock', 'futures', 'option'])}
           </div>
           <div className="grid grid-cols-2 gap-3">
             {field('quantity', '口數（正=多，負=空）', 'number')}
@@ -186,7 +201,7 @@ function PositionModal({
                   {field('expiry', '到期日', 'date')}
                 </div>
                 <div className="grid grid-cols-2 gap-3 mt-3">
-                  {select('option_type', '類型', ['call', 'put'])}
+                  {select('option_type', '買賣權', ['call', 'put'])}
                   {select('style', '行使方式', ['european', 'american'])}
                 </div>
               </div>
@@ -202,7 +217,14 @@ function PositionModal({
             取消
           </button>
           <button
-            onClick={() => onSave(pos)}
+            onClick={() => {
+              // 先標記已嘗試送出，讓錯誤顯示出來；有錯就不送。
+              // 修復前這裡是無條件 onSave(pos)，於是 option 缺 strike 也能存進
+              // positions.yaml，等到 risk agent 跑起來才在後端報錯——
+              // 使用者要到分析失敗才知道填錯了（SESSION_HANDOFF §七 P2-#9）。
+              setAttempted(true)
+              if (Object.keys(errors).length === 0) onSave(pos)
+            }}
             className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 transition-colors"
           >
             儲存
@@ -240,6 +262,11 @@ export function PositionsPanel({ onClose }: Props) {
     }
   }, [])
 
+  // 掛載時載入持倉——這是 effect 的正當用途（向外部系統取資料）。
+  // react-hooks/set-state-in-effect 之所以報錯，是因為 load() 會同步呼叫
+  // setLoading(true) 才進入 await。為了消除告警而把 loading 狀態延後，
+  // 只會讓 UI 短暫顯示空面板，是為了取悅 linter 而犧牲使用者體驗。
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load() }, [load])
 
   // Serializes all writes onto one promise chain so overlapping saves land on

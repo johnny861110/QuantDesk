@@ -1,4 +1,4 @@
-import type { RouterPayload } from '../types'
+import type { QueryType, RouterPayload } from '../types'
 
 const SCENARIO_ICON: Record<string, string> = {
   single_stock: '📈',
@@ -12,13 +12,17 @@ const DEPTH_COLOR: Record<string, string> = {
   deep: 'text-purple-400',
 }
 
-const QUERY_TYPE_LABEL: Record<string, string> = {
+// `satisfies Record<QueryType, string>` 讓 TypeScript 強制此表涵蓋所有 query_type。
+// 少一個就編譯失敗——Phase 16-E 新增 stock_investment 時漏改這裡，
+// UI 因而顯示原始英文 key「stock_investment」而非中文標籤。
+const QUERY_TYPE_LABEL = {
   stock_analysis:     '個股分析',
-  investment_strategy:'投資策略',
+  stock_investment:   '個股投資建議',
+  investment_strategy:'組合策略',
   fundamental_review: '基本面',
   macro_outlook:      '總經觀點',
   portfolio_risk:     '組合風控',
-}
+} satisfies Record<QueryType, string>
 
 interface Props {
   router: RouterPayload

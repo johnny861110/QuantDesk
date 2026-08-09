@@ -1,13 +1,36 @@
 export type Signal = 'bullish' | 'bearish' | 'neutral'
 export type StreamStatus = 'idle' | 'streaming' | 'done' | 'error'
 
+/**
+ * 查詢類型 —— 必須與後端 schemas/domain_report.py::RouterOutput.query_type
+ * 的 Literal 完全一致。新增類型時兩邊都要改。
+ */
+export const QUERY_TYPES = [
+  'stock_analysis',
+  'stock_investment',
+  'investment_strategy',
+  'fundamental_review',
+  'macro_outlook',
+  'portfolio_risk',
+] as const
+
+export type QueryType = (typeof QUERY_TYPES)[number]
+
 export interface RouterPayload {
   scenario: string
   targets: string[]
   market: string
   depth: string
   method: string
-  query_type?: string   // e.g. "stock_analysis" | "investment_strategy" | ...
+  /**
+   * 後端 schemas/domain_report.py::RouterOutput.query_type 的 Literal。
+   *
+   * 改為 union 型別而非 string：新增類型時 TypeScript 會強制
+   * RouterCard 的 QUERY_TYPE_LABEL 一起更新（有 satisfies 檢查），
+   * 避免像 Phase 16-E 新增 stock_investment 時漏改前端、
+   * 導致 UI 顯示原始英文 key 的情況重演。
+   */
+  query_type?: QueryType
   agents?: string[]     // which agents will run, e.g. ["technical","chip","news"]
   error?: string
 }

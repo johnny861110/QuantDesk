@@ -1,8 +1,26 @@
-import { useState } from 'react'
+import { Suspense, lazy, useState } from 'react'
 import type { AgentPayload, Signal } from '../types'
-import { RiskGreeksChart } from './charts/RiskGreeksChart'
-import { TechnicalRadar } from './charts/TechnicalRadar'
-import { ChipFlowChart } from './charts/ChipFlowChart'
+
+// 圖表元件 lazy load —— recharts 佔 bundle 大宗（SESSION_HANDOFF §七 P2-#7）。
+// 三張圖各自只在對應 agent 出現時才渲染，而多數查詢不會同時跑到
+// risk / technical / chip 三者，所以絕大多數情況根本不需要載入 recharts。
+// 靜態 import 會把它綁進主 bundle，讓每個使用者都付這個成本。
+const RiskGreeksChart = lazy(() =>
+  import('./charts/RiskGreeksChart').then(m => ({ default: m.RiskGreeksChart })),
+)
+const TechnicalRadar = lazy(() =>
+  import('./charts/TechnicalRadar').then(m => ({ default: m.TechnicalRadar })),
+)
+const ChipFlowChart = lazy(() =>
+  import('./charts/ChipFlowChart').then(m => ({ default: m.ChipFlowChart })),
+)
+
+/** 圖表載入中的佔位——高度與圖表相近，避免版面跳動。 */
+function ChartFallback() {
+  return (
+    <div className="mt-3 h-[160px] animate-pulse rounded-lg bg-gray-800/40" />
+  )
+}
 
 const SIGNAL_STYLE: Record<Signal, { badge: string; bar: string; glow: string; label: string }> = {
   bullish: { badge: 'bg-green-900/60 text-green-400 border-green-700', bar: 'bg-green-500', glow: 'border-green-800',  label: '偏多 ↑' },
@@ -97,7 +115,9 @@ function formatValFull(v: string | number | boolean | null): string {
  * (`break-all`) inside a fixed max-h-48 scroll box — unreadable in practice.
  */
 function MetadataModal({ data, onClose }: { data: AgentPayload; onClose: () => void }) {
-  const allFindings = Object.entries(data.key_findings)
+  // ?? {} 與同檔的 hard_constraints / errors 防護保持一致——
+  // 少了它，payload 缺 key_findings 會讓整張卡片以 TypeError 崩潰。
+  const allFindings = Object.entries(data.key_findings ?? {})
   const hcs = data.hard_constraints ?? []
   const errs = data.errors ?? []
 
@@ -265,7 +285,7 @@ export function AgentCard({ data, defaultExpanded = false }: Props) {
   const completeness = Math.round(data.data_completeness * 100)
   const pct = Math.round(data.confidence * 100)
 
-  const findings = Object.entries(data.key_findings)
+  const findings = Object.entries(data.key_findings ?? {})
     .filter(([, v]) => v !== null && v !== '' && v !== false)
     .slice(0, 5)
 
@@ -301,10 +321,12 @@ export function AgentCard({ data, defaultExpanded = false }: Props) {
         </div>
       </div>
 
-      {/* Agent-specific chart */}
-      {data.agent === 'risk' && <RiskGreeksChart findings={data.key_findings} />}
-      {data.agent === 'technical' && <TechnicalRadar findings={data.key_findings} />}
-      {data.agent === 'chip' && <ChipFlowChart findings={data.key_findings} />}
+      {/* Agent-specific chart（lazy loaded，見檔頭說明） */}
+      <Suspense fallback={<ChartFallback />}>
+        {data.agent === 'risk' && <RiskGreeksChart findings={data.key_findings ?? {}} />}
+        {data.agent === 'technical' && <TechnicalRadar findings={data.key_findings ?? {}} />}
+        {data.agent === 'chip' && <ChipFlowChart findings={data.key_findings ?? {}} />}
+      </Suspense>
 
       {/* Key findings */}
       {findings.length > 0 && (
@@ -353,7 +375,7 @@ export function AgentCard({ data, defaultExpanded = false }: Props) {
         <span>{showMeta ? '▾' : '▸'}</span>
         <span>中繼資料</span>
         <span className="ml-auto font-mono text-[10px] text-gray-700">
-          {Object.keys(data.key_findings).length} 指標
+          {Object.keys(data.key_findings ?? {}).length} 指標
           {(data.errors?.length ?? 0) > 0 && ` · ${data.errors.length} 警告`}
           {(data.hard_constraints?.length ?? 0) > 0 && ` · ${data.hard_constraints!.length} 約束`}
         </span>

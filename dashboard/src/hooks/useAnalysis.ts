@@ -39,12 +39,21 @@ function handleEvent(
       }
     }
 
-    case 'agent_done':
+    case 'agent_done': {
+      // agentOrder 決定 App.tsx 要渲染哪些卡片。後端保證 agent_start 先於
+      // agent_done，但若該事件因故遺失，agent 會存在於 state.agents
+      // 卻不在 agentOrder 裡——資料在、畫面卻看不到，且無任何錯誤跡象。
+      // agent_error 分支本來就有這個防護，這裡補上以保持一致。
+      const order = state.agentOrder.includes(payload.agent)
+        ? state.agentOrder
+        : [...state.agentOrder, payload.agent]
       return {
         ...state,
         agents: { ...state.agents, [payload.agent]: { ...payload, loading: false, receivedAt: Date.now() } },
+        agentOrder: order,
         currentEvent: `${payload.agent} 完成 (${payload.signal})`,
       }
+    }
 
     case 'agent_error': {
       // Mark the agent as failed so the card can render an error state

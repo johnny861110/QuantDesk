@@ -79,6 +79,15 @@ jobs:
         working-directory: quantdesk-starter/dashboard
         run: npm ci
 
+      # 順序刻意與後端一致：lint → 型別 → 測試
+      - name: Lint
+        working-directory: quantdesk-starter/dashboard
+        run: npm run lint
+
+      - name: Test
+        working-directory: quantdesk-starter/dashboard
+        run: npm run test
+
       - name: Type check & build
         working-directory: quantdesk-starter/dashboard
         run: npm run build

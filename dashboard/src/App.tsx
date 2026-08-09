@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
+import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
 import { useAnalysis } from './hooks/useAnalysis'
 import { useQueryHistory } from './hooks/useQueryHistory'
 import { RouterCard } from './components/RouterCard'
@@ -39,15 +39,23 @@ export default function App() {
     analyze(q)
   }
 
-  // Record completed analysis in history
+  // Record completed analysis in history.
+  //
+  // 必須在 effect 內做，不能在 render body：
+  // 原本的寫法在 render 期間讀寫 ref 並呼叫 addQuery()（會 setState 且寫
+  // localStorage）。main.tsx 啟用了 StrictMode，React 會刻意重跑 render；
+  // 在 concurrent 模式下 render 也可能被丟棄重來。render 必須是純的，
+  // 副作用一律進 effect。（ESLint react-hooks/refs 抓到這點）
   const prevStatusRef = useRef(state.status)
-  if (prevStatusRef.current === 'streaming' && state.status === 'done') {
-    // For queries without Supervisor, fall back to the first non-neutral agent signal
-    const sig: Signal | undefined = state.supervisor?.signal
-      ?? (Object.values(state.agents).find(a => !a.loading && !a.failed && a.signal !== 'neutral')?.signal as Signal | undefined)
-    addQuery(query, sig)
-  }
-  prevStatusRef.current = state.status
+  useEffect(() => {
+    if (prevStatusRef.current === 'streaming' && state.status === 'done') {
+      // For queries without Supervisor, fall back to the first non-neutral agent signal
+      const sig: Signal | undefined = state.supervisor?.signal
+        ?? (Object.values(state.agents).find(a => !a.loading && !a.failed && a.signal !== 'neutral')?.signal as Signal | undefined)
+      addQuery(query, sig)
+    }
+    prevStatusRef.current = state.status
+  }, [state.status, state.supervisor, state.agents, query, addQuery])
 
   const exportJson = useCallback(() => {
     const data = {
