@@ -623,11 +623,60 @@ class TestNarrativeVerifier:
     def test_rogue_number_flagged(self) -> None:
         """Number in narrative that is NOT in metrics → Verifier error emitted."""
         from agents.verifier import check_narrative
-        # Use a 3-digit number the regex can catch (regex matches up to 3 digits without commas)
+        # 任意長度的數字都會被偵測（Phase 16-F 修好 _NUM_RE 之後；修復前 4 位數以上會漏掉）
         narrative = "組合淨 delta 空頭偏重，損益約 -999 元。"
         errors = check_narrative(narrative, {"net_delta_pct_nav": -0.10})
         assert len(errors) > 0
         assert "[Verifier]" in errors[0]
+
+    def test_tw_ticker_in_narrative_is_not_flagged(
+        self,
+        minimal_positions: list[Position],
+        greeks_map_empty: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+    ) -> None:
+        """
+        迴歸守護（Phase 16-F 引入、後續修復）。
+
+        narrative 會列出未估計 beta 的個股代號，例如
+        「個股部位（2330.TW, AAPL）beta 未估計」。台股代號是 4 碼，
+        16-F 修好 _NUM_RE 讓 4 位數可被偵測之後，這些代號就會被
+        誤判成「未經工具驗證的數字」——每次跑 risk agent 都產生假錯誤。
+
+        修復方式：把 metrics["scenario_unmapped_symbols"] 的代號
+        透過 symbol_allowlist() 放行。這些代號本來就來自 metrics，
+        屬合法引用（_known_values() 只抽數值、忽略字串清單，故需明確放行）。
+
+        既有的 test_build_risk_signal_narrative_is_clean 沒抓到這個回歸，
+        因為 _make_scenario() 的 unmapped 預設為 None，從未走到該分支。
+        """
+        signal = build_risk_signal(
+            positions=minimal_positions, greeks_map=greeks_map_empty,
+            agg_result=mock_agg_ok,
+            scenario_result=_make_scenario(unmapped=["2330.TW", "AAPL"]),
+            portfolio_nav=PORTFOLIO_NAV, asof=MOCK_ASOF,
+        )
+        assert "2330.TW" in signal.narrative, "測試前提不成立：narrative 未列出代號"
+        verifier_errors = [e for e in signal.errors if "[Verifier]" in e]
+        assert verifier_errors == [], (
+            f"台股代號被誤判為幻覺數字：{verifier_errors}"
+        )
+
+    def test_real_hallucinated_number_still_flagged_with_allowlist(
+        self,
+        minimal_positions: list[Position],
+        greeks_map_empty: dict[int, GreeksResult],
+        mock_agg_ok: AggregationResult,
+    ) -> None:
+        """allowlist 只放行代號，不得順便放行其他未驗證數字。"""
+        from agents.verifier import check_narrative, symbol_allowlist
+        allow = symbol_allowlist("2330.TW")
+        errors = check_narrative(
+            "個股部位（2330.TW）beta 未估計，預估損益 987654 元。",
+            {"net_delta_pct_nav": -0.10},
+            allow=allow,
+        )
+        assert errors and any("987654" in e for e in errors)
 
     def test_build_risk_signal_narrative_is_clean(
         self,

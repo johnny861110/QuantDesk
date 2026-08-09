@@ -49,7 +49,7 @@ from langgraph.graph import END, StateGraph
 from adapters.base import DataSourceAdapter
 from adapters.options_adapter import FinMindOptionsAdapter, OptionRecord
 from adapters.price_adapter import FinMindPriceAdapter
-from agents.verifier import check_narrative
+from agents.verifier import check_narrative, symbol_allowlist
 from agents.risk.aggregation import AggregationResult, aggregate
 from observability.langfuse_setup import observe, update_current_span
 from agents.risk.position_loader import (
@@ -150,9 +150,11 @@ def _lf_fetch_fx(adapter: DataSourceAdapter, pair: str) -> Any:
 
 
 @observe(name="risk_agent:verifier:check_narrative", as_type="tool")  # type: ignore[misc]
-def _lf_check_narrative(narrative: str, metrics: dict[str, Any]) -> list[str]:
+def _lf_check_narrative(
+    narrative: str, metrics: dict[str, Any], allow: set[float] | None = None
+) -> list[str]:
     """Child span: narrative number-safety guard."""
-    return check_narrative(narrative, metrics)
+    return check_narrative(narrative, metrics, allow=allow)
 
 
 # ─── LangGraph state ──────────────────────────────────────────────────────────
@@ -690,7 +692,15 @@ def build_risk_signal(
         annotated_constraints = list(agg_result.hard_constraints)
 
     narrative = _build_narrative(metrics, annotated_constraints)
-    verifier_errors = _lf_check_narrative(narrative, metrics)   # child span
+
+    # narrative 會列出未估計 beta 的個股代號（如「個股部位（2330.TW, AAPL）」）。
+    # 台股代號是 4 碼，Phase 16-F 修好數字偵測後會被誤判成幻覺數字——
+    # 但這些代號正是來自 metrics["scenario_unmapped_symbols"]，屬合法引用。
+    # （_known_values() 只抽 metrics 的數值，忽略字串清單，故需明確放行。）
+    symbol_allow: set[float] = set()
+    for _sym in metrics.get("scenario_unmapped_symbols", []):
+        symbol_allow |= symbol_allowlist(str(_sym))
+    verifier_errors = _lf_check_narrative(narrative, metrics, allow=symbol_allow)   # child span
     if verifier_errors:
         all_errors.extend(verifier_errors)
 
@@ -850,7 +860,9 @@ def _build_narrative(
     if unmapped:
         parts.append(
             f"個股部位（{', '.join(unmapped)}）beta 未估計，"
-            "未納入情境壓力測試（Phase 3 補 rolling-beta 後補入）。"
+            # 不寫「Phase 3」——裸數字會被 Verifier 判為未驗證數字。
+            # 這類內部階段編號對使用者也沒有意義。
+            "未納入情境壓力測試（待 rolling-beta 估計完成後補入）。"
         )
 
     iv_source_str = str(metrics.get("iv_source", ""))
