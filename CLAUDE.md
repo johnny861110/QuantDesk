@@ -109,7 +109,10 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
 - [x] Phase 17：Evaluation Framework（prompt 快照 / router golden set /
       supervisor 資料驅動情境 / narrative faithfulness）— 兌現 `docs/spec.md §8.2`
 
-> 測試基準：**1123 passed / 1 skipped / 2 deselected**（2026-08-09 實測）。
+- [x] Phase 19：前端品質（vitest + ESLint + code splitting，dashboard 146 tests / 80% 覆蓋）
+
+> 測試基準：後端 **1123 passed / 1 skipped / 2 deselected**、
+> 前端 **146 passed**（覆蓋率 80%）（2026-08-09 實測）。
 > deselected 是 `llm_eval` 標記的真實 LLM 評估，預設排除（會產生 API 費用），
 > 手動執行：`uv run pytest -m llm_eval -q -s`
 > 修改此數字前請先實跑 `uv run pytest -q --cov`，不要沿用舊值。

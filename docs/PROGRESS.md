@@ -12,8 +12,10 @@
   React SSE Dashboard → Query-Type Routing）
 - **已完成**：Phase 16 — Truth & Correctness（branch `phase-16-hardening`，7 顆 commit）
 - **已完成**：Phase 17 — Evaluation Framework（branch `phase-17-evaluation`，L1-L4 全數）
-- **下一步**：Phase 19 — 前端品質（dashboard 目前 0 測試、無 ESLint）
-- **測試基準**：1123 passed / 1 skipped / 2 deselected、ruff & mypy 全綠、0 import 循環依賴
+- **已完成**：Phase 19 — 前端品質（branch `phase-19-frontend`）
+- **下一步**：無明確待辦；SESSION_HANDOFF §七 剩餘項目多為需人工確認或外部資料源限制
+- **測試基準**：後端 1123 passed、前端 146 passed（覆蓋率 80%）、
+  ruff & mypy & eslint 全綠、0 import 循環依賴
 
 ---
 

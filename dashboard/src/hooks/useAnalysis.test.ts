@@ -121,6 +121,17 @@ describe('agent 生命週期', () => {
     act(() => sse.emit('agent_error', { agent: 'macro', error: 'boom' }))
     expect(result.current.state.agentOrder).toEqual(['macro'])
   })
+
+  it('agent_done 沒有前導 agent_start 時也要加進順序', () => {
+    // App.tsx 用 agentOrder 決定渲染哪些卡片。若 agent_start 因故遺失，
+    // 舊版會讓資料存在於 state.agents 卻不在 agentOrder——
+    // 畫面看不到結果，且沒有任何錯誤跡象。
+    const { result } = startAnalysis()
+    act(() => sse.emit('agent_done', { agent: 'chip', signal: 'bullish' }))
+
+    expect(result.current.state.agentOrder).toEqual(['chip'])
+    expect(result.current.state.agents.chip.signal).toBe('bullish')
+  })
 })
 
 describe('router / debate / supervisor', () => {

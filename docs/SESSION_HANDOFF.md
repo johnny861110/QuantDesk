@@ -221,7 +221,10 @@ quantdesk-starter/
 
 ### P2（待優化）
 6. ⬜ **持倉 YAML 需每月手動更新到期日**：選擇權 expiry 到期後 position_loader 會報 T≤0 錯誤。應加入自動跳過已到期部位的邏輯。
-7. ⬜ **Frontend bundle size 大**：642KB（含 recharts），考慮 code splitting。
+7. ✅ **Frontend bundle size 大**：642KB（含 recharts）。
+   → **Phase 19 已修復**：三張圖表改用 React.lazy 動態載入，recharts 拆為按需 chunk。
+     主 bundle 646.62 kB → **254.01 kB**（gzip 190.25 → 76.91 kB，降 60%），
+     >500kB 警告消失。多數查詢不會同時跑到 risk/technical/chip，本來就不需載入 recharts。
 8. ⬜ **單 agent endpoint 無 symbol 輸入提示**：sidebar 點 agent 時用當前 Router 解析到的 symbol，若沒有則預設 2330。
 9. ✅ **PositionsPanel 未做欄位驗證**：例如 option 沒填 strike 可能導致 risk agent 失敗。
    → **Phase 19 已修復**：新增 `dashboard/src/lib/validatePosition.ts`，

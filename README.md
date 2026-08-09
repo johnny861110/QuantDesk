@@ -89,6 +89,8 @@ cd dashboard && npm run dev
 uv run ruff check .          # lint — 零 error 零 warning
 uv run mypy .                # 型別 — zero issues
 uv run pytest -q             # 1123 passed / 1 skipped / 2 deselected
+cd dashboard && npm run lint  # 前端 lint — 0 problems
+cd dashboard && npm run test  # 前端 146 tests
 cd dashboard && npm run build # frontend build
 ```
 
@@ -281,6 +283,8 @@ Greeks、財務指標、技術指標、統計量一律由純 Python 計算。LLM
 | 15 | Query-Type Routing + Async 重構 + 新聞修復 + UI 重大改版 | ✅ |
 | 16 | Truth & Correctness（文件對帳 + chip Verifier + verifier 修復 + SDK 統一 + query_type 切分）| ✅ |
 | 17 | Evaluation Framework（prompt 快照 + golden set + faithfulness）| ✅ |
+
+| 19 | 前端品質（vitest + ESLint + code splitting）| ✅ |
 
 > Phase 16/17 計畫見 `docs/tasks/phase_16.md`
 
