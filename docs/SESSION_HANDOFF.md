@@ -223,7 +223,11 @@ quantdesk-starter/
 6. ⬜ **持倉 YAML 需每月手動更新到期日**：選擇權 expiry 到期後 position_loader 會報 T≤0 錯誤。應加入自動跳過已到期部位的邏輯。
 7. ⬜ **Frontend bundle size 大**：642KB（含 recharts），考慮 code splitting。
 8. ⬜ **單 agent endpoint 無 symbol 輸入提示**：sidebar 點 agent 時用當前 Router 解析到的 symbol，若沒有則預設 2330。
-9. ⬜ **PositionsPanel 未做欄位驗證**：例如 option 沒填 strike 可能導致 risk agent 失敗。
+9. ✅ **PositionsPanel 未做欄位驗證**：例如 option 沒填 strike 可能導致 risk agent 失敗。
+   → **Phase 19 已修復**：新增 `dashboard/src/lib/validatePosition.ts`，
+     規則逐條鏡射後端 `position_loader.py::_parse_row()`（含 T≤0 到期防呆）。
+     驗證未過不送出 PUT，錯誤就地顯示（含 aria-invalid / role=alert）。
+     30 個測試涵蓋純函式邏輯 + UI 接線整合。
 
 ### P0'（2026-08-05 新發現，原清單未涵蓋）
 10. ✅ **chip_agent 是唯一未接 Verifier 的 agent**：`_llm_synthesize_chip()` 僅靠 prompt 文字約束 LLM 不複讀數字，無程式化檢查。**違反設計原則①**。
