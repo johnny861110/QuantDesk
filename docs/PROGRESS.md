@@ -6,31 +6,38 @@
 
 ---
 
-## 當前狀態（2026-08-05）
+## 當前狀態（2026-08-09）
 
-- **已完成**：Phase 0-15（骨架 → 七個 domain agent → Supervisor 仲裁 → Debate →
-  React SSE Dashboard → Query-Type Routing）
-- **已完成**：Phase 16 — Truth & Correctness（branch `phase-16-hardening`，7 顆 commit）
-- **已完成**：Phase 17 — Evaluation Framework（branch `phase-17-evaluation`，L1-L4 全數）
-- **已完成**：Phase 19 — 前端品質（branch `phase-19-frontend`）
-- **下一步**：無明確待辦；SESSION_HANDOFF §七 剩餘項目多為需人工確認或外部資料源限制
-- **測試基準**：後端 1123 passed、前端 146 passed（覆蓋率 80%）、
-  ruff & mypy & eslint 全綠、0 import 循環依賴
+- **已完成**：Phase 0-17、19
+  - 0-15：骨架 → 七個 domain agent → Supervisor 仲裁 → Debate → React SSE Dashboard → Query-Type Routing
+  - 16：Truth & Correctness（文件真實性對帳 + chip Verifier + verifier 4 位數修復 + SDK 統一 + query_type 切分）
+  - 17：Evaluation Framework（prompt 快照 / router golden set / supervisor 情境 / faithfulness）
+  - 19：前端品質（vitest + ESLint + code splitting）
+- **測試基準**：後端 1123 passed / 1 skipped / 2 deselected、前端 146 passed（覆蓋率 80%）
+- **品質關卡**：ruff / mypy / eslint 全綠、0 import 循環依賴
+- 全部已合併進 `main`（PR #34 #35 #36 #37），無殘留分支
+
+> 註：無 Phase 18。原規劃的編號在 Phase 16 重評估時併入 16/17，未另立。
 
 ---
 
 ## 下一步
 
-Phase 16 已全數完成（16-A/B/C/D/E + 計畫外的 16-F verifier 修復）。
+**沒有明確待辦。** `docs/SESSION_HANDOFF.md` §七 剩餘未解項目多屬下列兩類，
+不是寫程式能解決的：
 
-**下一步：Phase 17 Evaluation Framework**（見 `docs/tasks/phase_16.md` §四）
-1. L1 prompt 快照測試
-2. L2 Router golden set（≥30 組，純確定性可進 CI）
-3. L3 Supervisor S1-S5 情境改資料驅動 fixture
-4. L4 narrative faithfulness 評分器（復用 `verifier.py::check_narrative`）
+| 項目 | 性質 |
+|---|---|
+| FinMind IV 反推成功率未知 | 需**人工確認** FinMind 帳號是否有 TXO 選擇權資料權限 |
+| Macro degraded 模式 | FRED 免費資料源本身沒有 consensus 值 |
+| Tavily 搜尋詞品質 | 外部搜尋服務的結果品質，非本專案邏輯 |
+| 持倉到期日需手動更新 | 待接券商 API 才有意義（見 `position_loader.py` tech-debt 註記） |
 
-**待人工驗證**（pytest 測不出來）：在 `LANGFUSE_ENABLED=true` 環境跑一次
-demo script，確認 dashboard 上各 agent generation 節點有 token 用量與成本。
+若要繼續投入，價值較高的方向：
+1. `api/main.py` 覆蓋率仍偏低（64%），SSE 串流與錯誤路徑大片未測
+2. `adapters/cross_market_adapter.py` 44%、`fx_adapter.py` 57%——
+   未測的程式碼與自承 tech-debt 的程式碼高度重疊
+3. `multi_stock_scan` scenario 已定義但未實作（`SESSION_HANDOFF` §八）
 
 ---
 
@@ -45,5 +52,8 @@ demo script，確認 dashboard 上各 agent generation 節點有 token 用量與
 - **共用防線也要測**：agents/verifier.py 的 4 位數偵測缺陷存在已久，三關全綠、
   888 個測試都沒測出來，是補一個 0 覆蓋函式的測試時才發現的（Phase 16-F）。
   共用模組的核心邏輯要有直接的邊界測試，不能只靠 caller 的間接覆蓋
+- **文件的『下一步』區塊最容易腐化**：改狀態時只更新上半部、忘了下方的待辦清單，
+  會讓同一份文件自相矛盾（2026-08-09 實際發生，Phase 19 收尾時只改了『當前狀態』）。
+  改任何進度描述時，整份檔案讀過一遍再存。
 - **文件會腐化**：改動測試數、agent 數、架構描述時，同步檢查
   `CLAUDE.md` / `README.md` / `docs/spec.md` / `docs/SESSION_HANDOFF.md` 是否需要一起改
