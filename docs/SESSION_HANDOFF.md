@@ -248,8 +248,27 @@ quantdesk-starter/
 ### P0（影響結果正確性）
 1. ✅ **Risk agent 是組合層級，非個股**：`positions.yaml` 分析的是整個投資組合，不是查詢的個股。`stock_analysis` 模式現在已排除 risk agent，但 `investment_strategy` 仍會跑 risk 並可能因組合 breach 強制降級整個策略建議。
    → **Phase 16-E 已修復**：新增 `stock_investment` query_type 做個股/組合語意切分。
-2. ⬜ **FinMind IV 反推成功率未知**：`iv_source: "placeholder_0.20: 3/3"` 表示沒有取到真實 IV，需要確認 `FINMIND_TOKEN` 是否正確設定且帳號有 TXO 選擇權資料權限。
-   → 需**人工確認 FinMind 帳號權限**，非程式問題，Phase 16 不處理。
+2. ⬜ **FinMind IV 反推失敗 —— 根因已查明（2026-08-09）**：
+   `iv_source: "placeholder_0.20: 3/3"` 表示三個選擇權部位都用了 placeholder IV。
+
+   **不是權限問題。** 實測 free 方案可正常取得 `TaiwanOptionDaily`：
+   ```
+   start_date=2026-08-01  →  HTTP 200, 36,950 筆（範圍 08-03 ~ 08-10）
+   start_date=2026-08-05  →  HTTP 200,  7,048 筆（單日）
+   ```
+
+   **真正原因**：`adapters/options_adapter.py::_fetch_raw()` 查詢
+   `start_date = end_date = as_of`（正好當天）。risk agent 傳入的
+   `as_of` 是執行當下的日期，**遇到週末或國定假日必然回傳 0 筆**，
+   於是退回 placeholder。實測 2026-08-09 是星期日 → 0 筆；
+   同週三 08-05 → 7,048 筆。
+
+   **建議修法**：`_fetch_raw()` 加上回退——找不到資料時往前找最近的交易日
+   （例如最多回看 5 個日曆日），並在 `iv_source` 標明實際採用的日期，
+   讓下游知道 IV 的時效。不要靜默使用過舊的資料。
+
+   （另註：診斷過程中也出現過 `Max retries exceeded` 的連線錯誤，
+   那是當下網路中斷造成，與本問題無關。）
 
 ### P1（輸出品質）
 3. ⬜ **Fundamental narrative 偶爾空白**：`OPENAI_API_KEY` 正確但若網路超時仍會空白。
