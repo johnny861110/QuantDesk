@@ -50,7 +50,7 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
   **順序固定**：先 ruff → mypy → pytest。三關全過才算完成，不允許只跑 pytest。
 - **一次一個 Phase**：除非明確被指示平行，否則不要跨 Phase 動工。
 - **依賴管理一律用 uv**（Python 3.11+）：加依賴用 `uv add <pkg>` / `uv add --dev <pkg>`，
-  **絕不要用 `pip install`，也不要手動編輯 requirements.txt**。依賴定義在 `pyproject.toml`，
+  **絕不要用 `pip install`，也不要新增 requirements.txt**。依賴定義在 `pyproject.toml`，
   鎖定在 `uv.lock`（進版控）。所有指令透過 `uv run` 執行，不手動 activate venv。
 
 ## 平行開發規則（重要）

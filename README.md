@@ -139,6 +139,8 @@ PUT /api/positions    # 寫回 config/positions.yaml
 | `FINANCIAL_DB_PATH` | SQLite 財報資料庫路徑 | 預設 `../FinancialReports/data/financial.db` |
 | `LANGFUSE_ENABLED` | `true` 啟用 Langfuse tracing | 選填 |
 | `LANGFUSE_PUBLIC_KEY` / `SECRET_KEY` / `HOST` | Langfuse 設定 | Langfuse 啟用時 |
+| `LANGFUSE_TRACING_ENABLED` | Langfuse **SDK 官方**開關 —— `langfuse.openai` drop-in 只看這道 | 選填（測試中強制 false） |
+| `SEC_USER_AGENT` | 執行 `scripts/refresh_ticker_registry.py` 時抓 SEC 美股清單用。SEC 規定須含聯絡方式 | 僅該 script 需要 |
 
 ---
 
@@ -235,22 +237,30 @@ quantdesk-starter/
 ├── scripts/refresh_ticker_registry.py  # 重新產生上表
 ├── tests/                   # 1123 tests（pytest + pytest-cov）
 │   └── data/                # golden sets（router / supervisor）
-├── dashboard/src/
-│   ├── App.tsx              # 主頁（sidebar 佈局）
-│   ├── types.ts
-│   ├── hooks/
-│   │   ├── useAnalysis.ts       # analyze() + analyzeAgent() + retry()
-│   │   └── useQueryHistory.ts
-│   └── components/
-│       ├── AgentCard.tsx        # 含中繼資料展開面板
-│       ├── AgentSidebar.tsx     # 左側 agent 選擇欄
-│       ├── DebatePanel.tsx
-│       ├── PipelineProgress.tsx # 動態 agent nodes
-│       ├── PositionsPanel.tsx   # 持倉互動管理
-│       ├── RouterCard.tsx
-│       ├── SupervisorCard.tsx
-│       └── charts/              # recharts 圖表元件
-├── .github/workflows/ci.yml    # CI: ruff + mypy + pytest-cov + frontend build
+├── dashboard/               # 146 tests（vitest），覆蓋率 80%
+│   ├── eslint.config.js     # ESLint flat config
+│   ├── vite.config.ts       # 含 vitest 設定
+│   └── src/
+│       ├── App.tsx          # 主頁（sidebar 佈局）
+│       ├── types.ts         # 含 QueryType union（與後端 Literal 對齊）
+│       ├── lib/
+│       │   └── validatePosition.ts  # 持倉驗證（鏡射後端 position_loader）
+│       ├── test/
+│       │   ├── setup.ts             # 結構性保證測試不打真實網路
+│       │   └── mockEventSource.ts   # 可控 SSE 替身
+│       ├── hooks/
+│       │   ├── useAnalysis.ts       # analyze() + analyzeAgent() + retry()
+│       │   └── useQueryHistory.ts
+│       └── components/
+│           ├── AgentCard.tsx        # 含中繼資料面板；圖表 lazy load
+│           ├── AgentSidebar.tsx     # 左側 agent 選擇欄
+│           ├── DebatePanel.tsx
+│           ├── PipelineProgress.tsx # 動態 agent nodes
+│           ├── PositionsPanel.tsx   # 持倉互動管理 + 欄位驗證
+│           ├── RouterCard.tsx
+│           ├── SupervisorCard.tsx
+│           └── charts/              # recharts（動態 chunk，不進主 bundle）
+├── .github/workflows/ci.yml    # CI: ruff + mypy + pytest / eslint + vitest + build
 ├── CLAUDE.md                    # 開發守則（三條不可違反）
 └── docs/SESSION_HANDOFF.md      # 完整交接文件（下一個 session 必讀）
 ```
