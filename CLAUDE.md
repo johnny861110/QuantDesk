@@ -34,6 +34,12 @@ QuantDesk 是一個多智能體量化投研系統：一個 Supervisor 匯總七�
   `chip_agent` 使用，經 `domain_report_to_agent_signal()` 橋接回 `AgentSignal` 才進 Supervisor。
   `docs/refactor_plan.md` 原規劃的「七個 agent 全面 ReAct 化 / 全面改用 DomainReport」
   （該文 Phase D）**已正式放棄**，不要再依該文件的目標架構動工。理由見 refactor_plan.md 開頭註記。
+- **agent 進入點的兩種形式（不是不一致，是有理由的差異）**：
+  六個 agent 是無狀態函式 `run_<name>_agent(...)`，每次呼叫傳入 adapter；
+  `fundamental_agent` 是類別 `FundamentalAgent(db_path).run(stock_code, year, quarter)`。
+  差別在於它需要在建構時持有 SQLite 路徑，讓 `_build_graph()` 只建一次圖並跨呼叫重用，
+  而其他 agent 的相依都是每次呼叫才決定。
+  **新增 agent 一律用函式形式**，除非同樣需要建構期狀態。
 - 所有外部資料存取都走 `adapters/` 的抽象介面，**agent 內不得直接呼叫外部 API**
   （不得在 agent 裡直接 import yfinance / requests 打新聞站）。
 - 新增一個 domain agent **不得修改 Supervisor 核心**——只能新增 node 並註冊。

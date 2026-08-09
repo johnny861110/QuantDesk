@@ -106,7 +106,16 @@ GET /api/analyze/strategy?query=...   # 完整策略（全 agent + Debate + Supe
 GET /api/analyze/fundamental?symbol=  # 財報/基本面（fundamental+chip）
 GET /api/analyze/macro?market=TW      # 總經快照（macro+cross_market）
 GET /api/analyze/risk                 # 組合風控（risk only）
-GET /api/agent/{name}?symbol=&market= # 單一 agent
+GET /api/agent/{agent_name}?symbol=&market= # 單一 agent
+```
+
+### 標的搜尋
+```
+GET /api/symbols/search?q=台積&limit=20
+# → [{"symbol": "2330", "name": "台積電"}, ...]
+# 依代碼前綴或名稱子字串搜尋（FinMind 全市場清單）。
+# 支撐 sidebar 的搜尋框——單一 agent 執行前必須有明確選定的標的，
+# 不再靜默 fallback 到硬編碼預設值。查無或失敗時回傳 []。
 ```
 
 ### 持倉管理
@@ -115,17 +124,31 @@ GET /api/positions    # 讀取 config/positions.yaml
 PUT /api/positions    # 寫回 config/positions.yaml
 ```
 
+### 健康檢查
+```
+GET /health
+# → {"status": "ok", "finmind": "valid|invalid|unset|set_but_unreachable", ...}
+# finmind 欄位會實際發一次請求驗證 token 有效性，不只檢查環境變數是否存在。
+```
+
 ### SSE 事件格式
 ```json
 {"type": "router",            "payload": RouterPayload}
 {"type": "agent_start",       "payload": {"agent": str}}
 {"type": "agent_done",        "payload": AgentPayload}
 {"type": "agent_error",       "payload": {"agent": str, "error": str}}
-{"type": "debate_bull/bear/pm","payload": DebatePayload}
+{"type": "debate_start",      "payload": {}}
+{"type": "debate_bull",       "payload": DebatePartyPayload}
+{"type": "debate_bear",       "payload": DebatePartyPayload}
+{"type": "debate_pm",         "payload": DebatePMPayload}
 {"type": "supervisor",        "payload": SupervisorPayload}
 {"type": "fundamental_crawl", "payload": {"stage": str, "status": str}}
 {"type": "done",              "payload": {}}
+{"type": "error",             "payload": {"message": str}}
 ```
+
+> `done` 與 `error` 是**終止事件**——收到任一個就該關閉 EventSource。
+> `debate_start` 只在 `run_debate=true` 的 query_type 出現（見上方路由表）。
 
 ---
 

@@ -93,6 +93,20 @@ build:  npm run build ✓
 Router LLM（intent_router.py）
     │  RouterOutput { query_type, agents[], run_supervisor, run_debate }
     │
+    │  6 種 query_type（Phase 16-E 起）：
+    │    stock_analysis       個股技術/籌碼/新聞      3 agent，無仲裁
+    │    stock_investment     個股投資建議「值得買嗎」 6 agent（**不含 risk**）+ 仲裁 + Debate
+    │    investment_strategy  組合層策略調整          7 agent（含 risk）+ 仲裁 + Debate
+    │    fundamental_review   財報/基本面             2 agent，無仲裁
+    │    macro_outlook        總經/市場環境           2 agent，無仲裁
+    │    portfolio_risk       純 Greeks 風控查詢       risk only，無仲裁
+    │
+    │  ⚠️ stock_investment 與 investment_strategy 的差異是本架構最易誤解處：
+    │     risk agent 讀 positions.yaml 分析的是**整個組合**，與所查個股無關。
+    │     問「台積電值得買嗎」若納入 risk，組合中不相干部位的 breach 會透過
+    │     Supervisor Layer 1 強制降級整個個股建議（confidence 壓到 0.35）。
+    │     故個股走 stock_investment（無 risk），組合策略才走 investment_strategy。
+    │
     ▼
 api/main.py — _stream_analysis_with_router()
     │
